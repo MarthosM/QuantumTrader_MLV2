@@ -235,6 +235,194 @@ QuantumTrader_Production/
 - Review and adjust thresholds
 - Performance analysis
 
+## 🧹 System Cleanup & Maintenance
+
+### Files to Remove Periodically
+
+#### Obsolete/Deprecated Files
+```bash
+# Remove old development files
+rm -f src/production_old.py
+rm -f src/production_v1.py
+rm -f src/production_backup*.py
+rm -f core/start_production_old.py
+rm -f core/*_deprecated.py
+rm -f core/*_backup.py
+
+# Remove test/development artifacts
+rm -rf test_*.py
+rm -rf *_test.py
+rm -rf __pycache__/
+rm -rf .pytest_cache/
+rm -rf .coverage
+rm -rf htmlcov/
+
+# Remove temporary files
+rm -f *.tmp
+rm -f *.swp
+rm -f *~
+rm -f .DS_Store
+rm -f Thumbs.db
+```
+
+#### Log Cleanup (Keep Last 30 Days)
+```bash
+# Windows PowerShell
+Get-ChildItem -Path "logs" -Filter "*.log" | Where-Object {$_.LastWriteTime -lt (Get-Date).AddDays(-30)} | Remove-Item
+
+# Linux/Mac
+find logs/ -name "*.log" -mtime +30 -delete
+find logs/ -name "*.jsonl" -mtime +30 -delete
+```
+
+#### Data Cleanup (Archive Old Data)
+```bash
+# Archive old trading data (keep last 90 days)
+python -c "
+import os
+import shutil
+from datetime import datetime, timedelta
+from pathlib import Path
+
+data_dir = Path('data/book_tick_data')
+archive_dir = Path('data/archive')
+archive_dir.mkdir(exist_ok=True)
+
+cutoff_date = datetime.now() - timedelta(days=90)
+
+for file in data_dir.glob('*.csv'):
+    file_date = datetime.fromtimestamp(file.stat().st_mtime)
+    if file_date < cutoff_date:
+        shutil.move(str(file), str(archive_dir / file.name))
+        print(f'Archived: {file.name}')
+"
+```
+
+### Automated Cleanup Script
+Create `cleanup.py`:
+```python
+#!/usr/bin/env python3
+"""
+System cleanup script - Run weekly
+"""
+import os
+import shutil
+from pathlib import Path
+from datetime import datetime, timedelta
+
+def cleanup_system():
+    """Complete system cleanup"""
+    
+    # 1. Remove Python cache
+    for root, dirs, files in os.walk('.'):
+        if '__pycache__' in dirs:
+            shutil.rmtree(os.path.join(root, '__pycache__'))
+            print(f'Removed: {root}/__pycache__')
+    
+    # 2. Clean old logs (30+ days)
+    log_dir = Path('logs')
+    cutoff = datetime.now() - timedelta(days=30)
+    for log_file in log_dir.glob('*.log'):
+        if datetime.fromtimestamp(log_file.stat().st_mtime) < cutoff:
+            log_file.unlink()
+            print(f'Removed old log: {log_file.name}')
+    
+    # 3. Clean temporary files
+    patterns = ['*.tmp', '*.swp', '*~', '*.bak']
+    for pattern in patterns:
+        for temp_file in Path('.').rglob(pattern):
+            temp_file.unlink()
+            print(f'Removed temp: {temp_file}')
+    
+    # 4. Compress old data files
+    data_dir = Path('data/book_tick_data')
+    for csv_file in data_dir.glob('*.csv'):
+        if csv_file.stat().st_size > 100_000_000:  # 100MB
+            # Compress large files
+            import gzip
+            with open(csv_file, 'rb') as f_in:
+                with gzip.open(f'{csv_file}.gz', 'wb') as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+            csv_file.unlink()
+            print(f'Compressed: {csv_file.name}')
+    
+    # 5. Clean backups older than 7 days
+    backup_dir = Path('backups')
+    if backup_dir.exists():
+        cutoff = datetime.now() - timedelta(days=7)
+        for backup in backup_dir.glob('*.json'):
+            if datetime.fromtimestamp(backup.stat().st_mtime) < cutoff:
+                backup.unlink()
+                print(f'Removed old backup: {backup.name}')
+    
+    print('Cleanup completed!')
+
+if __name__ == '__main__':
+    cleanup_system()
+```
+
+### Files to NEVER Delete
+```
+IMPORTANT - PRESERVE THESE FILES:
+├── models/*.pkl              # Trained ML models
+├── .env.production          # Production configuration
+├── config_production.json   # System configuration
+├── src/                     # All source code
+├── core/                    # All core scripts
+├── requirements.txt         # Dependencies
+└── CLAUDE.md               # This file
+```
+
+### Obsolete Modules to Remove
+If you find any of these old modules, they can be safely deleted:
+- `src/production_old.py`
+- `src/production_v1.py`
+- `src/start_hmarl_old.py`
+- `src/agents/base_agent_old.py`
+- `src/agents/*_deprecated.py`
+- `core/start_production_old.py`
+- `core/monitor_old.py`
+- Any file with `_backup`, `_old`, `_deprecated` suffix
+
+### Database/Cache Cleanup
+```bash
+# Clear Redis/Valkey cache if using
+redis-cli FLUSHDB
+
+# Clear system cache
+python -c "
+import shutil
+cache_dirs = ['.cache', 'cache', '__pycache__']
+for dir in cache_dirs:
+    if Path(dir).exists():
+        shutil.rmtree(dir)
+        print(f'Cleared: {dir}')
+"
+```
+
+### Git Repository Cleanup
+```bash
+# Remove untracked files (careful!)
+git clean -n  # Dry run first
+git clean -f  # Actually remove
+
+# Clean git history (reduce size)
+git gc --aggressive --prune=now
+
+# Remove large files from history (if needed)
+# Use BFG Repo-Cleaner or git filter-branch
+```
+
+### Schedule Cleanup
+Add to crontab (Linux) or Task Scheduler (Windows):
+```bash
+# Weekly cleanup - Sunday 3 AM
+0 3 * * 0 cd /path/to/QuantumTrader && python cleanup.py
+
+# Daily log rotation
+0 0 * * * find /path/to/QuantumTrader/logs -name "*.log" -mtime +30 -delete
+```
+
 ## 💡 Important Notes
 
 1. **Market Hours**: System only works when market is open
