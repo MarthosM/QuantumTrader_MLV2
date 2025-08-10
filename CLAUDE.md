@@ -88,6 +88,12 @@ Trading Decision
 
 ## 🛡️ Production Safety Rules
 
+### CRITICAL: Git Commit Policy
+1. **NEVER commit automatically** without explicit user request
+2. **ONLY commit when user explicitly says**: "commit", "faça commit", "git commit"
+3. **ALWAYS wait for user approval** before pushing to repository
+4. **NO automatic commits** after code changes
+
 ### CRITICAL: Data Policy
 1. **ALWAYS use real market data** from ProfitDLL
 2. **NEVER use mock/synthetic data** in production

@@ -400,8 +400,16 @@ class ProductionFixedSystem:
                 self.logger.warning("Diretório de modelos não encontrado")
                 return
                 
-            # Lista de modelos compatíveis (11 features básicas)
-            compatible_models = ['simple_model']
+            # Lista de modelos compatíveis
+            # Modelos de 65 features (prioridade)
+            compatible_models_65 = ['xgboost_fast', 'xgboost_balanced_20250807_061838', 
+                                   'lightgbm_balanced', 'random_forest_stable', 
+                                   'random_forest_balanced_20250807_061838']
+            # Modelo de fallback (11 features)
+            compatible_models_11 = ['simple_model']
+            
+            # Combinar listas (65 features primeiro, depois fallback)
+            compatible_models = compatible_models_65 + compatible_models_11
             
             for model_file in models_dir.glob('*.pkl'):
                 try:

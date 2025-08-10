@@ -510,7 +510,7 @@ class QuantumTraderProduction:
         try:
             import subprocess
             monitor_process = subprocess.Popen(
-                ['python', 'monitor_console_enhanced.py'],
+                ['python', 'core/monitor_console_enhanced.py'],
                 creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == 'nt' else 0
             )
             logger.info("  [OK] Monitor Enhanced iniciado em nova janela")
