@@ -28,6 +28,9 @@ warnings.filterwarnings('ignore')
 # Carregar configurações
 load_dotenv('.env.production')
 
+# Importar novo sistema baseado em regime
+from src.trading.regime_based_strategy import RegimeBasedTradingSystem, RegimeSignal
+
 # ============= SISTEMA DE EVENTOS INTEGRADO =============
 from src.events import (
     init_event_system,
@@ -181,6 +184,10 @@ class QuantumTraderCompleteOCOEvents:
         # Gestão de Risco
         self.risk_manager = AdaptiveRiskManager(self.symbol) if AdaptiveRiskManager else None
         self.risk_calculator = DynamicRiskCalculator() if DynamicRiskCalculator else None
+        
+        # NOVO: Sistema baseado em regime (substituindo ML defeituoso)
+        self.regime_system = RegimeBasedTradingSystem(min_confidence=self.min_confidence)
+        logger.info("✓ Sistema de Trading Baseado em Regime inicializado")
         
         # Bridge para monitor
         self.monitor_bridge = get_bridge() if get_bridge else None
@@ -511,7 +518,7 @@ class QuantumTraderCompleteOCOEvents:
             traceback.print_exc()
             return False
     
-    def execute_trade_with_oco(self, signal, confidence, ml_prediction=None, hmarl_consensus=None):
+    def execute_trade_with_oco(self, signal, confidence, ml_prediction=None, hmarl_consensus=None, regime_signal=None):
         """Executa trade com OCO e emite eventos, com Sistema de Otimização"""
         
         global GLOBAL_POSITION_LOCK, GLOBAL_POSITION_LOCK_TIME
@@ -589,20 +596,29 @@ class QuantumTraderCompleteOCOEvents:
                 logger.error("[ERRO] Sem preço real do mercado!")
                 return False
             
-            # Calcular stop/take - com otimização ou padrão
+            # Calcular stop/take - priorizar sistema de regime
             targets_calculated = False
             
+            # NOVO: Usar targets do sistema de regime (PRIORIDADE MÁXIMA)
+            if regime_signal and hasattr(regime_signal, 'stop_loss'):
+                stop_price = regime_signal.stop_loss
+                take_price = regime_signal.take_profit
+                targets_calculated = True
+                logger.info(f"[REGIME] Usando targets do {regime_signal.strategy}")
+                logger.info(f"  Regime: {regime_signal.regime.value}")
+                logger.info(f"  Risk/Reward: {regime_signal.risk_reward:.1f}:1")
+            
             # Tentar usar targets do sistema de otimização
-            if self.optimization_system and 'targets' in locals() and trade_details.get('targets'):
+            elif self.optimization_system and 'targets' in locals() and trade_details.get('targets'):
                 targets = trade_details['targets']
                 stop_price = targets.get('stop_loss')
                 take_price = targets.get('take_profit')
                 if stop_price and take_price:
                     targets_calculated = True
-                    logger.info(f"[OTIMIZAÇÃO] Usando targets adaptativos do regime {self.optimization_system.current_regime}")
+                    logger.info(f"[OTIMIZAÇÃO] Usando targets adaptativos")
             
             # Se não tem targets da otimização, usar risk_calculator ou padrão
-            if not targets_calculated and self.risk_calculator:
+            elif not targets_calculated and self.risk_calculator:
                 risk_levels = self.risk_calculator.calculate_dynamic_levels(
                     current_price=current_price,
                     signal=signal,
@@ -622,11 +638,70 @@ class QuantumTraderCompleteOCOEvents:
                     stop_price = current_price + 15
                     take_price = current_price - 30
             
+            # VALIDAÇÃO E CORREÇÃO DE TARGETS
+            # Arredondar para tick do WDO (0.5 pontos)
+            def round_to_tick(price, tick_size=0.5):
+                return round(price / tick_size) * tick_size
+            
+            current_price = round_to_tick(current_price)
+            stop_price = round_to_tick(stop_price)
+            take_price = round_to_tick(take_price)
+            
+            # Validar e corrigir targets para SELL
+            if signal < 0:  # SELL
+                # Para SELL: take < entry < stop
+                if take_price >= current_price:
+                    logger.warning(f"[CORREÇÃO] SELL: Take {take_price} >= Entry {current_price}")
+                    # Inverter se necessário
+                    if stop_price < current_price:
+                        stop_price, take_price = take_price, stop_price
+                    else:
+                        # Forçar take abaixo
+                        take_price = current_price - abs(stop_price - current_price)
+                    logger.info(f"[CORREÇÃO] Novos valores: Stop={stop_price}, Take={take_price}")
+                
+                if stop_price <= current_price:
+                    logger.warning(f"[CORREÇÃO] SELL: Stop {stop_price} <= Entry {current_price}")
+                    stop_price = current_price + 10  # Mínimo 10 pontos
+            
+            # Validar e corrigir targets para BUY
+            elif signal > 0:  # BUY
+                # Para BUY: stop < entry < take
+                if take_price <= current_price:
+                    logger.warning(f"[CORREÇÃO] BUY: Take {take_price} <= Entry {current_price}")
+                    # Inverter se necessário
+                    if stop_price > current_price:
+                        stop_price, take_price = take_price, stop_price
+                    else:
+                        # Forçar take acima
+                        take_price = current_price + abs(current_price - stop_price)
+                    logger.info(f"[CORREÇÃO] Novos valores: Stop={stop_price}, Take={take_price}")
+                
+                if stop_price >= current_price:
+                    logger.warning(f"[CORREÇÃO] BUY: Stop {stop_price} >= Entry {current_price}")
+                    stop_price = current_price - 10  # Mínimo 10 pontos
+            
+            # Arredondar novamente após correções
+            stop_price = round_to_tick(stop_price)
+            take_price = round_to_tick(take_price)
+            
             logger.info("=" * 60)
             logger.info(f"[TRADE OCO] {side}")
             logger.info(f"  Confiança: {confidence:.2%}")
-            logger.info(f"  Stop: {stop_price:.0f}")
-            logger.info(f"  Take: {take_price:.0f}")
+            logger.info(f"  Entry: {current_price:.1f}")
+            logger.info(f"  Stop: {stop_price:.1f}")
+            logger.info(f"  Take: {take_price:.1f}")
+            
+            # Calcular Risk/Reward
+            if signal > 0:  # BUY
+                risk = current_price - stop_price
+                reward = take_price - current_price
+            else:  # SELL
+                risk = stop_price - current_price
+                reward = current_price - take_price
+            
+            rr_ratio = reward / risk if risk > 0 else 0
+            logger.info(f"  Risk/Reward: {rr_ratio:.2f}:1")
             
             # Enviar OCO
             order_ids = self.connection.send_order_with_bracket(
@@ -818,8 +893,60 @@ class QuantumTraderCompleteOCOEvents:
         
         logger.info("[SISTEMA LIMPO] Pronto para nova posição")
     
+    def position_consistency_check(self):
+        """Thread que verifica consistência entre posição local e real"""
+        logger.info("[CONSISTENCY] Thread de verificação de posição iniciada")
+        
+        while self.running:
+            try:
+                time.sleep(10)  # Verificar a cada 10 segundos
+                
+                # Só verificar se sistema acha que tem posição
+                if self.has_open_position:
+                    # Verificar se posição realmente existe
+                    if self.connection and hasattr(self.connection, 'check_position_exists'):
+                        has_position, quantity, side = self.connection.check_position_exists(self.symbol)
+                        
+                        if not has_position:
+                            # Sistema acha que tem posição mas não tem!
+                            logger.warning("[CONSISTENCY] INCONSISTÊNCIA DETECTADA: Sistema tem posição mas mercado não tem!")
+                            logger.info("[CONSISTENCY] Limpando posição fantasma...")
+                            
+                            # Chamar handle_position_closed para limpar
+                            self.handle_position_closed("consistency_check")
+                            
+                            logger.info("[CONSISTENCY] Posição fantasma limpa, sistema pronto para novos trades")
+                        else:
+                            # Log periódico de confirmação
+                            if not hasattr(self, '_consistency_log_count'):
+                                self._consistency_log_count = 0
+                            self._consistency_log_count += 1
+                            
+                            if self._consistency_log_count % 30 == 0:  # Log a cada 5 minutos
+                                logger.debug(f"[CONSISTENCY] Posição confirmada: {quantity} {side}")
+                
+                # Verificar também o inverso: se não tem posição local mas tem real
+                elif not self.has_open_position and self.connection:
+                    if hasattr(self.connection, 'check_position_exists'):
+                        has_position, quantity, side = self.connection.check_position_exists(self.symbol)
+                        
+                        if has_position:
+                            logger.warning(f"[CONSISTENCY] Posição detectada no mercado mas não no sistema: {quantity} {side}")
+                            # Atualizar sistema com posição real
+                            self.has_open_position = True
+                            self.current_position = quantity if side == "BUY" else -quantity
+                            self.current_position_side = side
+                            self.position_open_time = datetime.now()
+                            logger.info("[CONSISTENCY] Sistema atualizado com posição real")
+                
+            except Exception as e:
+                logger.error(f"[CONSISTENCY] Erro na verificação: {e}")
+                time.sleep(30)  # Esperar mais em caso de erro
+    
     def cleanup_orphan_orders_loop(self):
         """Thread que verifica e cancela ordens órfãs periodicamente"""
+        global GLOBAL_POSITION_LOCK, GLOBAL_POSITION_LOCK_TIME
+        
         while self.running:
             try:
                 time.sleep(5)  # Verificar a cada 5 segundos
@@ -897,8 +1024,86 @@ class QuantumTraderCompleteOCOEvents:
                 'timestamp', 'symbol', 'price', 'volume', 'aggressor'
             ])
     
+    def _save_regime_status_for_monitor(self, regime_signal):
+        """Salva status do regime para o monitor ler"""
+        try:
+            # Criar diretório se não existir
+            monitor_dir = Path('data/monitor')
+            monitor_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Salvar status do regime
+            regime_status = {
+                'timestamp': datetime.now().isoformat(),
+                'regime': regime_signal.regime.value if regime_signal else 'undefined',
+                'confidence': regime_signal.confidence if regime_signal else 0.0,
+                'strategy': regime_signal.strategy if regime_signal else 'none'
+            }
+            
+            with open(monitor_dir / 'regime_status.json', 'w') as f:
+                json.dump(regime_status, f, indent=2)
+            
+            # Salvar último sinal se houver
+            if regime_signal and regime_signal.signal != 0:
+                signal_data = {
+                    'timestamp': datetime.now().isoformat(),
+                    'signal': regime_signal.signal,
+                    'confidence': regime_signal.confidence,
+                    'entry_price': regime_signal.entry_price,
+                    'stop_loss': regime_signal.stop_loss,
+                    'take_profit': regime_signal.take_profit,
+                    'risk_reward': regime_signal.risk_reward
+                }
+                
+                with open(monitor_dir / 'latest_signal.json', 'w') as f:
+                    json.dump(signal_data, f, indent=2)
+            
+            # Atualizar estatísticas
+            self._update_regime_statistics(regime_signal)
+            
+        except Exception as e:
+            logger.debug(f"Erro ao salvar status do regime: {e}")
+    
+    def _update_regime_statistics(self, regime_signal):
+        """Atualiza estatísticas do sistema de regime"""
+        try:
+            monitor_dir = Path('data/monitor')
+            stats_file = monitor_dir / 'regime_stats.json'
+            
+            # Carregar estatísticas existentes
+            if stats_file.exists():
+                with open(stats_file, 'r') as f:
+                    stats = json.load(f)
+            else:
+                stats = {
+                    'total_trades': 0,
+                    'wins': 0,
+                    'losses': 0,
+                    'trend_trades': 0,
+                    'lateral_trades': 0,
+                    'regime_distribution': {}
+                }
+            
+            # Atualizar distribuição de regime
+            if regime_signal:
+                regime_name = regime_signal.regime.value
+                stats['regime_distribution'][regime_name] = stats['regime_distribution'].get(regime_name, 0) + 1
+                
+                # Contar trades por tipo
+                if regime_signal.signal != 0:
+                    if 'trend' in regime_name.lower():
+                        stats['trend_trades'] += 1
+                    elif 'lateral' in regime_name.lower():
+                        stats['lateral_trades'] += 1
+            
+            # Salvar estatísticas atualizadas
+            with open(stats_file, 'w') as f:
+                json.dump(stats, f, indent=2)
+                
+        except Exception as e:
+            logger.debug(f"Erro ao atualizar estatísticas: {e}")
+    
     def _save_ml_status_for_monitor(self, ml_result: Dict, predictions: Dict):
-        """Salva status ML para o monitor ler"""
+        """Salva status ML para o monitor ler (compatibilidade)"""
         try:
             # Incrementar contador aqui também
             if not hasattr(self, '_ml_saved_count'):
@@ -920,22 +1125,32 @@ class QuantumTraderCompleteOCOEvents:
             
             # Adicionar predições das camadas se disponíveis
             if predictions:
-                # Context layer
+                # Context layer - usar prediction ao invés de regime
                 context = predictions.get('context', {})
-                ml_status['context_pred'] = self._convert_signal_to_text(context.get('regime', 0))
-                ml_status['context_conf'] = float(context.get('regime_conf', 0.5))  # Garantir float
+                context_pred = context.get('prediction', 0.5)
+                if context_pred > 0.6:
+                    ml_status['context_pred'] = 'BUY'
+                elif context_pred < 0.4:
+                    ml_status['context_pred'] = 'SELL'
+                else:
+                    ml_status['context_pred'] = 'HOLD'
+                ml_status['context_conf'] = float(context.get('confidence', context_pred))
                 
-                # Microstructure layer
+                # Microstructure layer - usar prediction ao invés de order_flow
                 micro = predictions.get('microstructure', {})
-                ml_status['micro_pred'] = self._convert_signal_to_text(micro.get('order_flow', 0))
-                ml_status['micro_conf'] = float(micro.get('order_flow_conf', 0.5))  # Garantir float
+                micro_pred = micro.get('prediction', 0.5)
+                if micro_pred > 0.6:
+                    ml_status['micro_pred'] = 'BUY'
+                elif micro_pred < 0.4:
+                    ml_status['micro_pred'] = 'SELL'
+                else:
+                    ml_status['micro_pred'] = 'HOLD'
+                ml_status['micro_conf'] = float(micro.get('confidence', micro_pred))
                 
                 # Meta layer
-                meta = predictions.get('meta', 0)
-                if isinstance(meta, (int, float)):
-                    ml_status['meta_pred'] = self._convert_signal_to_text(meta)
-                else:
-                    ml_status['meta_pred'] = 'HOLD'
+                meta = predictions.get('meta_learner', {})
+                meta_signal = meta.get('signal', 0)
+                ml_status['meta_pred'] = self._convert_signal_to_text(meta_signal)
             else:
                 # Se não há predições, adicionar valores variáveis baseados no mercado
                 if self.last_book_update:
@@ -1274,7 +1489,10 @@ class QuantumTraderCompleteOCOEvents:
             logger.error(f"Erro ao verificar posição: {e}")
     
     def make_hybrid_prediction(self):
-        """Faz predição usando modelos híbridos + HMARL"""
+        """
+        NOVO SISTEMA: Baseado em Regime + HMARL para timing
+        Substitui ML defeituoso por estratégias específicas de regime
+        """
         try:
             # Log para debug
             if not hasattr(self, '_prediction_count'):
@@ -1284,9 +1502,19 @@ class QuantumTraderCompleteOCOEvents:
             # Verificar se tem dados suficientes
             buffer_size = len(self.book_buffer)
             if self._prediction_count <= 5:
-                logger.info(f"[PREDICTION #{self._prediction_count}] Buffer size: {buffer_size}/100")
+                logger.info(f"[PREDICTION #{self._prediction_count}] Buffer size: {buffer_size}/20")
             
-            # Atualizar HMARL mesmo com poucos dados (para visualização)
+            # Atualizar sistema de regime com dados atuais
+            if self.last_book_update and buffer_size >= 20:
+                current_price = (self.last_book_update.get('bid_price_1', 5500) + 
+                               self.last_book_update.get('ask_price_1', 5505)) / 2
+                volume = self.last_book_update.get('bid_volume_1', 0) + \
+                        self.last_book_update.get('ask_volume_1', 0)
+                
+                # Atualizar detector de regime
+                self.regime_system.update(current_price, volume)
+            
+            # Atualizar HMARL para timing
             if self.hmarl_agents and self.last_book_update and buffer_size >= 5:
                 try:
                     book_data = self.last_book_update
@@ -1316,137 +1544,135 @@ class QuantumTraderCompleteOCOEvents:
                     if self._prediction_count <= 3:
                         logger.warning(f"[HMARL] Erro ao atualizar: {e}")
             
-            if buffer_size < 100:
+            # Aguardar dados mínimos para o sistema de regime
+            if buffer_size < 20:
                 if self._prediction_count <= 5:
-                    logger.info(f"[PREDICTION] Aguardando mais dados... ({buffer_size}/100)")
+                    logger.info(f"[PREDICTION] Aguardando mais dados... ({buffer_size}/20)")
                 return {'signal': 0, 'confidence': 0.0}
             
-            # 1. Predição ML REAL
+            # ==== NOVO SISTEMA BASEADO EM REGIME ====
+            # 1. Obter sinal HMARL para timing
+            hmarl_signal = None
+            hmarl_confidence = 0.5
+            
+            if self.hmarl_agents:
+                try:
+                    consensus = self.hmarl_agents.get_consensus()
+                    hmarl_signal = {
+                        'action': consensus.get('action', 'HOLD'),
+                        'confidence': consensus.get('confidence', 0.5)
+                    }
+                    hmarl_confidence = consensus.get('confidence', 0.5)
+                    
+                    # Log HMARL
+                    if self._prediction_count % 20 == 0:
+                        logger.info(f"[HMARL] Signal: {hmarl_signal['action']}, Conf: {hmarl_confidence:.0%}")
+                except Exception as e:
+                    logger.debug(f"HMARL não disponível: {e}")
+            
+            # 2. Obter sinal do sistema de regime (substituindo ML defeituoso)
+            regime_signal = None
             ml_signal = 0
             ml_confidence = 0.0
-            ml_predictions = {}
             
-            # Usar HybridMLPredictor se disponível (reduzir requisito de buffer)
-            if self.ml_predictor and len(self.book_buffer) >= 20:  # Reduzido de 100 para 20
+            # Usar sistema de regime ao invés de ML defeituoso
+            if self.last_book_update and buffer_size >= 20:
                 try:
-                    # Calcular features (simplificado - idealmente usar BookFeatureEngineerRT)
-                    features = self._calculate_features_from_buffer()
+                    current_price = (self.last_book_update.get('bid_price_1', 5500) + 
+                                   self.last_book_update.get('ask_price_1', 5505)) / 2
                     
-                    # Log das features principais para debug
-                    if self._prediction_count % 10 == 0:
-                        logger.info(f"[ML DEBUG] Features calculadas:")
-                        logger.info(f"  Spread: {features.get('spread', 0):.2f}")
-                        logger.info(f"  Imbalance: {features.get('imbalance', 0):.4f}")
-                        logger.info(f"  Returns_1: {features.get('returns_1', 0):.4f}")
-                        logger.info(f"  Volatility_20: {features.get('volatility_20', 0):.4f}")
-                        logger.info(f"  Mid Price: {features.get('mid_price', 0):.2f}")
-                    
-                    # Fazer predição
-                    ml_result = self.ml_predictor.predict(features)
-                    
-                    ml_signal = ml_result.get('signal', 0)
-                    ml_confidence = ml_result.get('confidence', 0.0)
-                    ml_predictions = ml_result.get('predictions', {})
-                    
-                    # Log detalhado das predições
-                    if self._prediction_count % 10 == 0:
-                        logger.info(f"[ML DEBUG] Predições:")
-                        if ml_predictions:
-                            context = ml_predictions.get('context', {})
-                            micro = ml_predictions.get('microstructure', {})
-                            logger.info(f"  Context Regime: {context.get('regime', 0):.2f} (conf: {context.get('regime_conf', 0):.2%})")
-                            logger.info(f"  Micro OrderFlow: {micro.get('order_flow', 0):.2f} (conf: {micro.get('order_flow_conf', 0):.2%})")
-                            logger.info(f"  Meta Prediction: {ml_predictions.get('meta', 0):.4f}")
-                        logger.info(f"  Final Signal: {ml_signal}, Confidence: {ml_confidence:.2%}")
-                    
-                    # Salvar status ML para o monitor
-                    self._save_ml_status_for_monitor(ml_result, ml_predictions)
-                    
-                    if self._prediction_count <= 5:
-                        logger.info(f"[ML REAL] Signal: {ml_signal}, Confidence: {ml_confidence:.2%}")
-                    
-                except Exception as e:
-                    logger.error(f"Erro na predição ML: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    # Fallback para predição simulada em caso de erro
-                    import random
-                    if random.random() < 0.05:  # Reduzir frequência de trades simulados
-                        ml_signal = random.choice([-1, 0, 1])
-                        ml_confidence = 0.5 + random.random() * 0.3
-            
-            # Fallback: se não tem ML real, usar simulação ocasional
-            elif self.models and len(self.book_buffer) >= 100:
-                import random
-                if random.random() < 0.05:  # 5% de chance apenas
-                    ml_signal = random.choice([-1, 0, 1])
-                    ml_confidence = 0.5 + random.random() * 0.3
-            
-            # 2. Predição HMARL
-            hmarl_signal = 0
-            hmarl_confidence = 0.0
-            
-            if self.hmarl_agents and self.last_book_update:
-                try:
-                    book_data = self.last_book_update
-                    current_price = (book_data.get('bid_price_1', 5500) + book_data.get('ask_price_1', 5505)) / 2
-                    
-                    # Log para debug
-                    if not hasattr(self, '_hmarl_update_count'):
-                        self._hmarl_update_count = 0
-                    self._hmarl_update_count += 1
-                    
-                    if self._hmarl_update_count <= 5 or self._hmarl_update_count % 100 == 0:
-                        logger.info(f"[HMARL UPDATE #{self._hmarl_update_count}] Price: {current_price:.2f}, Volume: {self.total_volume}")
-                    
-                    # Gerar features para HMARL
-                    hmarl_features = self._generate_hmarl_features()
-                    
-                    self.hmarl_agents.update_market_data(
-                        price=current_price,
-                        volume=self.total_volume,
-                        book_data={
-                            'spread': book_data.get('ask_price_1', 5505) - book_data.get('bid_price_1', 5500),
-                            'imbalance': hmarl_features.get('order_flow_imbalance_5', 0)
-                        },
-                        features=hmarl_features  # Passar features completas
+                    # Obter sinal baseado em regime (sem log excessivo)
+                    regime_signal = self.regime_system.get_trading_signal(
+                        current_price=current_price,
+                        hmarl_signal=hmarl_signal
                     )
                     
-                    consensus = self.hmarl_agents.get_consensus()
-                    hmarl_signal = 1 if consensus['action'] == 'BUY' else -1 if consensus['action'] == 'SELL' else 0
-                    hmarl_confidence = consensus.get('confidence', 0.0)
-                    
-                    if self._hmarl_update_count <= 5:
-                        logger.info(f"[HMARL CONSENSUS] Action: {consensus['action']}, Confidence: {hmarl_confidence:.2%}")
+                    if regime_signal:
+                        # Converter sinal de regime para formato esperado
+                        ml_signal = regime_signal.signal  # 1=BUY, -1=SELL, 0=HOLD
+                        ml_confidence = regime_signal.confidence
+                        
+                        # Log do sinal de regime
+                        if self._prediction_count % 10 == 0:
+                            logger.info(f"[REGIME] {regime_signal.regime.value.upper()}")
+                            logger.info(f"  Strategy: {regime_signal.strategy}")
+                            logger.info(f"  Signal: {'BUY' if ml_signal == 1 else 'SELL' if ml_signal == -1 else 'HOLD'}")
+                            logger.info(f"  Confidence: {ml_confidence:.0%}")
+                            logger.info(f"  Entry: {regime_signal.entry_price:.2f}")
+                            logger.info(f"  Stop: {regime_signal.stop_loss:.2f}")
+                            logger.info(f"  Target: {regime_signal.take_profit:.2f}")
+                            logger.info(f"  Risk/Reward: {regime_signal.risk_reward:.1f}:1")
+                        
+                        # Salvar dados para o monitor (compatibilidade)
+                        ml_result = {
+                            'signal': ml_signal,
+                            'confidence': ml_confidence,
+                            'regime': regime_signal.regime.value,
+                            'strategy': regime_signal.strategy
+                        }
+                        ml_predictions = {
+                            'context': {'regime': regime_signal.regime.value, 'confidence': ml_confidence},
+                            'microstructure': {'strategy': regime_signal.strategy, 'confidence': ml_confidence},
+                            'meta_learner': {'signal': ml_signal, 'confidence': ml_confidence}
+                        }
+                        self._save_ml_status_for_monitor(ml_result, ml_predictions)
+                        # NOVO: Salvar status do regime para o monitor
+                        self._save_regime_status_for_monitor(regime_signal)
+                        
+                    else:
+                        # Sem sinal no momento - atualizar status do regime periodicamente
+                        if self._prediction_count % 20 == 0:  # A cada 20 iterações
+                            stats = self.regime_system.get_stats()
+                            current_regime = stats.get('current_regime', 'undefined')
+                            
+                            # Criar objeto regime falso para salvar status
+                            from src.trading.regime_based_strategy import RegimeSignal, MarketRegime
+                            try:
+                                regime_enum = MarketRegime(current_regime) if current_regime != 'undefined' else MarketRegime.UNDEFINED
+                            except:
+                                regime_enum = MarketRegime.LATERAL
+                                
+                            status_signal = type('obj', (object,), {
+                                'regime': regime_enum,
+                                'confidence': 0.6,
+                                'strategy': 'waiting',
+                                'signal': 0
+                            })()
+                            
+                            # Salvar status mesmo sem sinal (para mostrar regime atual no monitor)
+                            self._save_regime_status_for_monitor(status_signal)
+                            
+                            if self._prediction_count % 100 == 0:  # Log menos frequente
+                                logger.info(f"[REGIME] Aguardando setup - Regime: {current_regime}")
                     
                 except Exception as e:
-                    logger.warning(f"Erro HMARL: {e}")
+                    logger.error(f"Erro no sistema de regime: {e}")
+                    import traceback
+                    traceback.print_exc()
+            # HMARL já foi processado acima para timing
             
-            # 3. Combinar sinais
-            if ml_signal != 0 or hmarl_signal != 0:
-                combined_signal = 0.6 * ml_signal + 0.4 * hmarl_signal
-                combined_confidence = max(ml_confidence, hmarl_confidence)
-                
-                final_signal = int(np.sign(combined_signal)) if abs(combined_signal) > 0.3 else 0
+            # 3. Retornar sinal do sistema de regime (com HMARL para timing)
+            if ml_signal != 0:
+                # Sistema de regime gerou sinal válido
                 
                 # Emitir evento de sinal gerado
-                if final_signal != 0:
-                    self.event_bus.publish(Event(
-                        type=EventType.SIGNAL_GENERATED,
-                        data={
-                            'signal': final_signal,
-                            'confidence': combined_confidence,
-                            'ml_signal': ml_signal,
-                            'hmarl_signal': hmarl_signal
-                        },
-                        source="prediction_engine"
-                    ))
+                self.event_bus.publish(Event(
+                    type=EventType.SIGNAL_GENERATED,
+                    data={
+                        'signal': ml_signal,
+                        'confidence': ml_confidence,
+                        'regime': regime_signal.regime.value if regime_signal else 'undefined',
+                        'strategy': regime_signal.strategy if regime_signal else 'none',
+                        'hmarl_timing': hmarl_signal['action'] if hmarl_signal else 'HOLD'
+                    },
+                    source="regime_system"
+                ))
                 
                 return {
-                    'signal': final_signal,
-                    'confidence': combined_confidence,
-                    'ml_signal': ml_signal,
-                    'hmarl_signal': hmarl_signal
+                    'signal': ml_signal,
+                    'confidence': ml_confidence,
+                    'regime_signal': regime_signal,
+                    'hmarl_timing': hmarl_signal
                 }
             
             return {'signal': 0, 'confidence': 0.0}
@@ -1569,11 +1795,15 @@ class QuantumTraderCompleteOCOEvents:
                     ml_pred = prediction.get('ml_data', {'signal': prediction['signal'], 'confidence': prediction['confidence']})
                     hmarl_cons = prediction.get('hmarl_data', {'signal': prediction['signal'], 'confidence': prediction['confidence'], 'action': 'BUY' if prediction['signal'] > 0 else 'SELL'})
                     
+                    # NOVO: Passar regime_signal se disponível
+                    regime_signal = prediction.get('regime_signal', None)
+                    
                     self.execute_trade_with_oco(
                         signal=prediction['signal'],
                         confidence=prediction['confidence'],
                         ml_prediction=ml_pred,
-                        hmarl_consensus=hmarl_cons
+                        hmarl_consensus=hmarl_cons,
+                        regime_signal=regime_signal  # Passar info do regime
                     )
                 
                 time.sleep(1)
@@ -1664,7 +1894,9 @@ class QuantumTraderCompleteOCOEvents:
         threads = [
             threading.Thread(target=self.trading_loop, daemon=True, name="Trading"),
             threading.Thread(target=self.metrics_loop, daemon=True, name="Metrics"),
-            threading.Thread(target=self.data_collection_loop, daemon=True, name="DataCollection")
+            threading.Thread(target=self.data_collection_loop, daemon=True, name="DataCollection"),
+            threading.Thread(target=self.cleanup_orphan_orders_loop, daemon=True, name="Cleanup"),
+            threading.Thread(target=self.position_consistency_check, daemon=True, name="Consistency")
         ]
         
         for thread in threads:
