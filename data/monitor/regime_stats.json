@@ -1,0 +1,11 @@
+{
+  "total_trades": 0,
+  "wins": 0,
+  "losses": 0,
+  "trend_trades": 0,
+  "lateral_trades": 418,
+  "regime_distribution": {
+    "undefined": 17,
+    "lateral": 1745
+  }
+}

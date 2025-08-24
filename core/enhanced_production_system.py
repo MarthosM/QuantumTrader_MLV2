@@ -22,12 +22,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src'))
 
 # Importar base do sistema
-from production_fixed import ProductionFixedSystem
+from src.production_fixed import ProductionFixedSystem
 
 # Importar novos componentes de features
-from features.book_features_rt import BookFeatureEngineerRT
-from book_data_manager import BookDataManager
-from buffers.circular_buffer import CandleBuffer, BookBuffer, TradeBuffer
+from src.features.book_features_rt import BookFeatureEngineerRT
+from src.features.feature_mapping import FeatureMapper
+from src.book_data_manager import BookDataManager
+from src.buffers.circular_buffer import CandleBuffer, BookBuffer, TradeBuffer
 
 # Tentar importar componentes HMARL
 try:
@@ -70,6 +71,7 @@ class EnhancedProductionSystem(ProductionFixedSystem):
         # Componentes de features
         self.book_manager = BookDataManager(max_book_snapshots=100, max_trades=1000)
         self.feature_engineer = BookFeatureEngineerRT(self.book_manager)
+        self.feature_mapper = FeatureMapper()
         
         # Buffers adicionais
         self.candle_buffer = CandleBuffer(max_size=200)
@@ -99,9 +101,9 @@ class EnhancedProductionSystem(ProductionFixedSystem):
             'candles': 0
         }
         
-        # Fallback configuration
-        self.use_fallback = True
-        self.fallback_values = self._initialize_fallback_values()
+        # Fallback configuration - DESABILITADO para usar apenas features reais
+        self.use_fallback = False  # IMPORTANTE: Não usar valores mock/fallback
+        self.fallback_values = {}  # Sem valores fallback
         
         # Enhanced monitoring
         self.enhanced_monitor_data = {
@@ -283,6 +285,9 @@ class EnhancedProductionSystem(ProductionFixedSystem):
             with self.feature_lock:
                 features = self.feature_engineer.calculate_incremental_features({})
                 
+                # Aplicar mapeamento para agentes HMARL
+                features = self.feature_mapper.map_features(features)
+                
                 # Estatísticas
                 calc_time = (time.time() - start_time) * 1000
                 self.feature_stats['calculations'] += 1
@@ -342,28 +347,52 @@ class EnhancedProductionSystem(ProductionFixedSystem):
             # Converter para array na ordem correta
             feature_vector = self.feature_engineer.get_feature_vector()
             
+            # Log diagnóstico
+            non_zero = np.count_nonzero(feature_vector)
+            self.logger.debug(f"Feature vector: {len(feature_vector)} features, {non_zero} não-zero")
+            
             predictions = []
+            models_used = []
+            
             for model_name, model in self.models.items():
                 try:
-                    if hasattr(model, 'n_features_in_') and model.n_features_in_ == 65:
+                    # Verificar compatibilidade do modelo
+                    expected_features = getattr(model, 'n_features_in_', None)
+                    
+                    # Aceitar modelos sem n_features_in_ ou com features compatíveis
+                    if expected_features is None or expected_features == len(feature_vector) or expected_features == 65:
                         if hasattr(model, 'predict_proba'):
                             pred = model.predict_proba(feature_vector.reshape(1, -1))[0, 1]
                         else:
                             pred = model.predict(feature_vector.reshape(1, -1))[0]
+                        
                         predictions.append(pred)
+                        models_used.append(model_name)
+                        
+                    else:
+                        self.logger.warning(f"Modelo {model_name} espera {expected_features} features, mas temos {len(feature_vector)}")
+                        
                 except Exception as e:
-                    self.logger.debug(f"Erro em predição {model_name}: {e}")
+                    self.logger.warning(f"Erro em predição {model_name}: {e}")
             
             if predictions:
                 # Ensemble - média das predições
                 final_prediction = np.mean(predictions)
                 self._last_prediction = final_prediction
+                
+                # Log apenas mudanças significativas
+                if abs(final_prediction - 0.5) > 0.1:
+                    self.logger.info(f"ML Prediction: {final_prediction:.3f} ({len(models_used)} modelos: {', '.join(models_used)})")
+                
                 return final_prediction
-            
-            return 0.5  # Neutro se não há predições
+            else:
+                self.logger.warning(f"Nenhum modelo fez predição! Features: {len(feature_vector)}, não-zero: {non_zero}")
+                return 0.5  # Neutro se não há predições
             
         except Exception as e:
             self.logger.error(f"Erro em ML prediction: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             return 0.5
     
     def _broadcast_to_agents(self, features: Dict, prediction: float):

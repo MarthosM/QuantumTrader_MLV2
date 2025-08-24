@@ -28,10 +28,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger('ProductionSystem')
 
+# Adicionar paths do projeto
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent))
+sys.path.append(str(Path(__file__).parent))
+
 # Importar componentes do sistema
 from enhanced_production_system import EnhancedProductionSystem
 from src.consensus.hmarl_consensus_system import IntegratedHMARLSystem
-from src.logging.structured_logger import TradingLogger
+from src.trading_logging.structured_logger import TradingLogger
 from src.metrics.metrics_and_alerts import TradingMetricsSystem
 # from enhanced_monitor_v2 import EnhancedMonitorV2  # Desabilitado temporariamente
 
@@ -84,6 +90,15 @@ class QuantumTraderProduction:
         logger.info("\n[2/5] Inicializando Sistema Enhanced...")
         try:
             self.components['production'] = EnhancedProductionSystem()
+            
+            # IMPORTANTE: Inicializar conexão com B3
+            logger.info("  Conectando com B3 via DLL...")
+            init_result = self.components['production'].initialize()
+            if init_result:
+                logger.info("  [OK] Conectado à B3 com sucesso!")
+            else:
+                logger.warning("  [AVISO] Falha na conexão com B3 - sistema rodará em modo simulado")
+            
             logger.info("  [OK] Sistema Enhanced inicializado (65 features)")
             
             # Habilitar gravação de dados se configurado
@@ -142,7 +157,7 @@ class QuantumTraderProduction:
             return False
         
         logger.info("\n[SUCESSO] Componentes essenciais inicializados!")
-        return success
+        return True  # Sempre retornar True se chegou até aqui
     
     def setup_data_recording(self):
         """Configura gravação de dados book e tick"""
@@ -617,8 +632,11 @@ def main():
     
     try:
         # Criar e iniciar sistema
+        logger.info("[MAIN] Criando sistema de produção...")
         system = QuantumTraderProduction()
+        logger.info("[MAIN] Sistema criado, iniciando loop principal...")
         system.start()
+        logger.info("[MAIN] Sistema finalizado normalmente")
         
     except KeyboardInterrupt:
         logger.info("\n[AVISO] Interrupção manual")

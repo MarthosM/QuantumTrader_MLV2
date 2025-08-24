@@ -1,0 +1,22 @@
+{
+  "timestamp": "2025-08-19T06:55:56.575803",
+  "data_source": "C:\\Users\\marth\\Downloads\\WDO_FUT\\WDOFUT_BMF_T.csv",
+  "sample_size": 500000,
+  "models": [
+    "context_regime_detector",
+    "context_volatility_forecaster",
+    "context_session_classifier",
+    "micro_order_flow_analyzer",
+    "micro_book_dynamics",
+    "meta_meta_learner"
+  ],
+  "scalers": [
+    "context",
+    "microstructure"
+  ],
+  "layers": [
+    "context",
+    "microstructure",
+    "meta_learner"
+  ]
+}

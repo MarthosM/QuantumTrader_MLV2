@@ -10,8 +10,25 @@
       "Bash(git remote add:*)",
       "Bash(git branch:*)",
       "Bash(git push:*)",
-      "Bash(cp:*)"
+      "Bash(cp:*)",
+      "Bash(dir logs*.log /o:-d)",
+      "Bash(tasklist:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(findstr:*)",
+      "Bash(copy:*)",
+      "Bash(xcopy:*)",
+      "Bash(cmd /c \"copy C:\\Users\\marth\\Downloads\\ProfitDLL\\DLLs\\ProfitDLL64.dll .\")",
+      "Bash(dir:*)",
+      "Bash(powershell:*)",
+      "Bash(cmd /c \"copy C:\\Users\\marth\\OneDrive\\Programacao\\Python\\Projetos\\QuantumTrader_ML\\src\\profit_dll_structures.py src\\profit_dll_structures.py\")",
+      "Bash(grep:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(start cmd /k python core/monitor_console_enhanced.py)",
+      "Bash(cmd /c:*)",
+      "Bash(taskkill:*)",
+      "Bash(git commit:*)"
     ],
-    "deny": []
+    "deny": [],
+    "defaultMode": "acceptEdits"
   }
 }

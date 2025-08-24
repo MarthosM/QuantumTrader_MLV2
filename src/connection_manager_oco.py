@@ -596,34 +596,84 @@ class ConnectionManagerOCO(ConnectionManagerWorking):
             return (False, 0, "")
         
         try:
-            # DESABILITADO: GetPosition está causando access violation
-            # TODO: Implementar quando tivermos a assinatura correta
-            """
+            # CORREÇÃO: Implementação correta de GetPosition conforme manual ProfitDLL v4.0.0.30
             if hasattr(self.dll, 'GetPosition'):
-                # Configurar GetPosition
-                self.dll.GetPosition.argtypes = [c_wchar_p]
-                self.dll.GetPosition.restype = c_int
-                
-                position = self.dll.GetPosition(symbol)
-                
-                if position != 0:
-                    side = "BUY" if position > 0 else "SELL"
-                    self.logger.debug(f"[POSITION CHECK] {symbol}: {abs(position)} {side}")
-                    return (True, abs(position), side)
-                else:
-                    self.logger.debug(f"[POSITION CHECK] {symbol}: Sem posição")
-                    return (False, 0, "")
-            """
+                try:
+                    # Criar estrutura TAssetIDRec para o ativo
+                    class TAssetIDRec(Structure):
+                        _fields_ = [
+                            ("ticker", c_wchar * 35),
+                            ("bolsa", c_wchar * 15),
+                        ]
+                    
+                    # Preparar estrutura do ativo
+                    asset = TAssetIDRec()
+                    asset.ticker = symbol
+                    asset.bolsa = "F"  # F para futuros
+                    
+                    self.logger.debug(f"[GETPOSITION DEBUG] Chamando GetPosition para {symbol} bolsa={asset.bolsa}")
+                    
+                    # Variáveis para receber resultado
+                    quantity = c_int(0)
+                    avg_price = c_double(0.0)
+                    
+                    # Configurar assinatura CORRETA da função
+                    self.dll.GetPosition.argtypes = [
+                        POINTER(TAssetIDRec),  # asset structure pointer
+                        POINTER(c_int),         # quantity pointer
+                        POINTER(c_double)       # average price pointer
+                    ]
+                    self.dll.GetPosition.restype = c_int
+                    
+                    # Chamar GetPosition com assinatura correta
+                    result = self.dll.GetPosition(
+                        byref(asset),
+                        byref(quantity),
+                        byref(avg_price)
+                    )
+                    
+                    self.logger.debug(f"[GETPOSITION DEBUG] Resultado: {result}, Quantity: {quantity.value}, AvgPrice: {avg_price.value}")
+                    
+                    if result == 0:  # NL_OK - sucesso
+                        if quantity.value != 0:
+                            side = "BUY" if quantity.value > 0 else "SELL"
+                            self.logger.info(f"[POSITION CHECK] GetPosition OK: {symbol}: {abs(quantity.value)} {side} @ {avg_price.value:.2f}")
+                            return (True, abs(quantity.value), side)
+                        else:
+                            self.logger.debug(f"[POSITION CHECK] GetPosition OK mas quantity=0: Sem posição")
+                            return (False, 0, "")
+                    elif result == -2147483637:  # NL_NO_POSITION
+                        self.logger.debug(f"[POSITION CHECK] GetPosition retornou NL_NO_POSITION (-2147483637)")
+                        return (False, 0, "")
+                    else:
+                        self.logger.warning(f"[POSITION CHECK] GetPosition retornou erro código: {result}")
+                        self.logger.warning(f"[POSITION CHECK] Possíveis causas: símbolo incorreto, DLL não inicializada, ou assinatura incorreta")
+                        # Usar fallback
+                        raise Exception(f"GetPosition error: {result}")
+                        
+                except Exception as e:
+                    self.logger.warning(f"[POSITION CHECK] Erro ao usar GetPosition: {e}, usando fallback")
+                    # Continuar para método alternativo
+                    pass
             
             # Método alternativo: verificar se há ordens ativas de stop/take
             # Se não há ordens ativas, provavelmente posição foi fechada
-            active_oco_count = sum(1 for g in self.oco_monitor.oco_groups.values() if g['active'])
-            if active_oco_count == 0:
-                self.logger.debug("[POSITION CHECK] Sem ordens OCO ativas - posição provavelmente fechada")
-                return (False, 0, "")
+            active_oco_count = sum(1 for g in self.oco_monitor.oco_groups.values() if g.get('active', False))
             
-            # Se há ordens OCO ativas, assumir que posição existe
-            return (True, 1, "UNKNOWN")
+            self.logger.info(f"[POSITION CHECK FALLBACK] Grupos OCO ativos: {active_oco_count}")
+            
+            if active_oco_count == 0:
+                self.logger.info("[POSITION CHECK FALLBACK] Sem ordens OCO ativas - posição provavelmente fechada")
+                return (False, 0, "")
+            else:
+                # Tentar obter mais detalhes do grupo OCO ativo
+                for main_id, group in self.oco_monitor.oco_groups.items():
+                    if group.get('active', False):
+                        self.logger.info(f"[POSITION CHECK FALLBACK] Grupo OCO ativo encontrado: Main={main_id}, Stop={group.get('stop')}, Take={group.get('take')}")
+                        break
+                
+                self.logger.info("[POSITION CHECK FALLBACK] Há ordens OCO ativas, assumindo que posição existe")
+                return (True, 1, "UNKNOWN")
             
         except Exception as e:
             self.logger.error(f"Erro ao verificar posição: {e}")

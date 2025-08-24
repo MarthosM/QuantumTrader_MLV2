@@ -1,0 +1,33 @@
+{
+  "timestamp": "2025-08-11T09:08:09.548405",
+  "components_active": [
+    "production",
+    "hmarl",
+    "logger",
+    "metrics"
+  ],
+  "metrics": {
+    "metrics": {
+      "timestamp": "2025-08-11T09:08:09.548405",
+      "counters": {},
+      "gauges": {},
+      "histograms": {}
+    },
+    "alerts": [],
+    "alert_stats": {
+      "total": 0,
+      "by_severity": {},
+      "by_component": {}
+    }
+  },
+  "logs": {
+    "total_logs": 0,
+    "by_level": {},
+    "errors": 0,
+    "warnings": 0
+  },
+  "data_recording": {
+    "book": 0,
+    "tick": 0
+  }
+}

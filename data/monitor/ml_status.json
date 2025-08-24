@@ -1,0 +1,13 @@
+{
+  "timestamp": "2025-08-22T17:21:16.936717",
+  "ml_status": "ACTIVE",
+  "ml_predictions": 96,
+  "update_id": 1755894076936,
+  "ml_confidence": 0.6128365334004808,
+  "signal": -1,
+  "context_pred": "HOLD",
+  "context_conf": 0.6128365334004808,
+  "micro_pred": "HOLD",
+  "micro_conf": 0.6128365334004808,
+  "meta_pred": "SELL"
+}

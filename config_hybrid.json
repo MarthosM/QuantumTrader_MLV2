@@ -1,0 +1,67 @@
+{
+  "trading": {
+    "symbol": "WDOU25",
+    "min_confidence": 0.60,
+    "max_daily_trades": 50,
+    "stop_loss": 0.005,
+    "take_profit": 0.010,
+    "position_size": 1,
+    "max_positions": 2
+  },
+  
+  "models": {
+    "use_hybrid": true,
+    "ml_weight": 0.6,
+    "hmarl_weight": 0.4,
+    "model_validation_threshold": 0.70,
+    "confidence_threshold": {
+      "scalping": 0.65,
+      "intraday": 0.60,
+      "swing": 0.55
+    }
+  },
+  
+  "training": {
+    "enable_daily_training": true,
+    "training_hour": 18,
+    "training_minute": 30,
+    "training_min_samples": 10000,
+    "days_to_keep_data": 7,
+    "batch_size": 1000,
+    "validation_split": 0.2
+  },
+  
+  "data_collection": {
+    "enable_collection": true,
+    "save_interval_seconds": 300,
+    "buffer_size": 100000,
+    "features_to_collect": [
+      "price", "volume", "spread", "imbalance", 
+      "bid_vol_1", "ask_vol_1", "mid_price"
+    ]
+  },
+  
+  "monitoring": {
+    "log_level": "INFO",
+    "performance_report_interval": 3600,
+    "alert_on_low_accuracy": true,
+    "min_acceptable_accuracy": 0.60,
+    "telegram_alerts": false
+  },
+  
+  "risk_management": {
+    "max_daily_loss": 500.0,
+    "max_daily_trades": 50,
+    "pause_after_consecutive_losses": 3,
+    "reduce_size_after_loss": true,
+    "scaling_factor": 0.5
+  },
+  
+  "system": {
+    "inference_interval_ms": 100,
+    "monitoring_interval_seconds": 60,
+    "health_check_interval": 300,
+    "auto_restart_on_error": true,
+    "max_restart_attempts": 3
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "timestamp": "2025-08-10T11:32:50.438435",
+  "components_active": [
+    "production",
+    "hmarl",
+    "logger",
+    "metrics"
+  ],
+  "metrics": {
+    "metrics": {
+      "timestamp": "2025-08-10T11:32:50.438435",
+      "counters": {
+        "features_calculated": 8840,
+        "predictions_made": 136,
+        "last_prediction_confidence": 0.75
+      },
+      "gauges": {},
+      "histograms": {
+        "feature_latency": {
+          "mean": 0.001027399999999796,
+          "p50": 0.0009567000000743064,
+          "p95": 0.0016176000000314161,
+          "p99": 0.0032438850001881335
+        },
+        "prediction_latency": {
+          "mean": 0.0008259676470642904,
+          "p50": 0.0008033999999952357,
+          "p95": 0.001014175000079831,
+          "p99": 0.0017622100000039612
+        }
+      }
+    },
+    "alerts": [],
+    "alert_stats": {
+      "total": 0,
+      "by_severity": {},
+      "by_component": {}
+    }
+  },
+  "logs": {
+    "total_logs": 408,
+    "by_level": {
+      "FEATURE": 136,
+      "INFO": 136,
+      "AGENT": 136
+    },
+    "errors": 0,
+    "warnings": 0
+  },
+  "data_recording": {
+    "book": 0,
+    "tick": 0
+  }
+}

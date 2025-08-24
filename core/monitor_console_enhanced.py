@@ -13,6 +13,17 @@ from pathlib import Path
 from collections import deque
 import numpy as np
 
+# Adicionar path para imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+
+# Importar bridge dos agentes HMARL
+try:
+    from src.monitoring.hmarl_monitor_bridge import get_bridge
+    BRIDGE_AVAILABLE = True
+except ImportError:
+    BRIDGE_AVAILABLE = False
+
 try:
     from colorama import init, Fore, Back, Style
     init()
@@ -51,10 +62,20 @@ class EnhancedConsoleMonitor:
         # Cache de métricas
         self.last_metrics = {}
         self.last_features = {}
+        self.metrics_data = {}  # Adicionar metrics_data
         
         # Configuração de display
         self.screen_width = 120
         self.refresh_rate = 2  # segundos
+    
+    def get_default_agents(self):
+        """Retorna dados padrão dos agentes quando não há dados reais"""
+        return [
+            {"name": "OrderFlow", "signal": "HOLD", "confidence": 0.50, "weight": 0.30},
+            {"name": "Liquidity", "signal": "HOLD", "confidence": 0.50, "weight": 0.20},
+            {"name": "TapeReading", "signal": "HOLD", "confidence": 0.50, "weight": 0.25},
+            {"name": "Footprint", "signal": "HOLD", "confidence": 0.50, "weight": 0.25}
+        ]
     
     def clear_screen(self):
         """Limpa a tela"""
@@ -160,19 +181,117 @@ class EnhancedConsoleMonitor:
         
         print(f"{Back.BLACK}{Fore.GREEN}{Style.BRIGHT}╚{'═' * 56}╝{Style.RESET_ALL}")
     
+    def draw_ml_panel(self):
+        """Painel de ML Híbrido"""
+        print(f"\n{Back.BLACK}{Fore.CYAN}{Style.BRIGHT}╔{'═' * 56}╗{Style.RESET_ALL}")
+        print(f"{Back.BLACK}{Fore.CYAN}{Style.BRIGHT}║{'🧠 ML HYBRID SYSTEM (3 Layers)':^56}║{Style.RESET_ALL}")
+        print(f"{Back.BLACK}{Fore.CYAN}{Style.BRIGHT}╠{'═' * 56}╣{Style.RESET_ALL}")
+        
+        # Tentar obter dados ML do arquivo de status ou métricas
+        ml_data = {
+            'context_pred': 'HOLD',
+            'micro_pred': 'HOLD', 
+            'meta_pred': 'HOLD',
+            'ml_confidence': 0.0,
+            'ml_status': 'WAITING',
+            'ml_predictions': 0
+        }
+        
+        # Ler do arquivo de métricas se existir
+        metrics = self.read_latest_metrics()
+        if metrics:
+            ml_data['ml_predictions'] = metrics.get('ml.predictions', 0)
+            
+        # Ler status ML do arquivo de bridge se disponível
+        ml_status_file = Path('data/monitor/ml_status.json')
+        if ml_status_file.exists():
+            try:
+                with open(ml_status_file, 'r') as f:
+                    ml_status = json.load(f)
+                    
+                    # Converter valores numéricos para texto se necessário
+                    for key in ['context_pred', 'micro_pred', 'meta_pred']:
+                        if key in ml_status:
+                            val = ml_status[key]
+                            if isinstance(val, (int, float)):
+                                if val > 0.3 or val == 1:
+                                    ml_status[key] = 'BUY'
+                                elif val < -0.3 or val == -1:
+                                    ml_status[key] = 'SELL'
+                                else:
+                                    ml_status[key] = 'HOLD'
+                    
+                    ml_data.update(ml_status)
+            except Exception as e:
+                logger.debug(f"Erro ao ler ml_status.json: {e}")
+        
+        # Layer predictions
+        layers = [
+            ('Context Layer', ml_data.get('context_pred', 'HOLD'), ml_data.get('context_conf', 0.5)),
+            ('Microstructure', ml_data.get('micro_pred', 'HOLD'), ml_data.get('micro_conf', 0.5)),
+            ('Meta-Learner', ml_data.get('meta_pred', 'HOLD'), ml_data.get('ml_confidence', 0.0))
+        ]
+        
+        for layer_name, pred, conf in layers:
+            # Cor baseada na predição
+            if pred == 'BUY' or pred == 1:
+                pred_color = Fore.GREEN
+                icon = "↑"
+                pred_text = "BUY"
+            elif pred == 'SELL' or pred == -1:
+                pred_color = Fore.RED
+                icon = "↓"
+                pred_text = "SELL"
+            else:
+                pred_color = Fore.YELLOW
+                icon = "→"
+                pred_text = "HOLD"
+            
+            conf_bar = self.draw_progress_bar(conf, 10)
+            print(f"{Fore.CYAN}║ {layer_name:<22} {pred_color}{icon} {pred_text:<5}{Fore.RESET} "
+                  f"{conf_bar} {conf:.1%}       ║")
+        
+        print(f"{Back.BLACK}{Fore.CYAN}{Style.BRIGHT}╠{'═' * 56}╣{Style.RESET_ALL}")
+        
+        # Status do ML
+        ml_status = ml_data.get('ml_status', 'WAITING')
+        # Garantir que metrics_data existe
+        if not hasattr(self, 'metrics_data'):
+            self.metrics_data = {}
+        ml_predictions = self.metrics_data.get('ml_predictions', 0)
+        
+        if ml_predictions > 0:
+            ml_status = 'ACTIVE'
+            status_color = Fore.GREEN
+        else:
+            status_color = Fore.YELLOW
+        
+        print(f"{Fore.CYAN}║ ML Status: {status_color}{ml_status:<10}{Fore.RESET} "
+              f"| Predictions: {ml_predictions:>5}     ║")
+        
+        print(f"{Back.BLACK}{Fore.CYAN}{Style.BRIGHT}╚{'═' * 56}╝{Style.RESET_ALL}")
+    
     def draw_agents_panel(self):
         """Painel de Agentes HMARL"""
         print(f"\n{Back.BLACK}{Fore.MAGENTA}{Style.BRIGHT}╔{'═' * 56}╗{Style.RESET_ALL}")
         print(f"{Back.BLACK}{Fore.MAGENTA}{Style.BRIGHT}║{'🤖 HMARL AGENTS (4 Specialists)':^56}║{Style.RESET_ALL}")
         print(f"{Back.BLACK}{Fore.MAGENTA}{Style.BRIGHT}╠{'═' * 56}╣{Style.RESET_ALL}")
         
-        # Agentes simulados
-        agents = [
-            {"name": "OrderFlowSpecialist", "signal": "BUY", "confidence": 0.75, "weight": 0.30},
-            {"name": "LiquidityAgent", "signal": "HOLD", "confidence": 0.60, "weight": 0.20},
-            {"name": "TapeReadingAgent", "signal": "BUY", "confidence": 0.65, "weight": 0.25},
-            {"name": "FootprintPatternAgent", "signal": "HOLD", "confidence": 0.55, "weight": 0.25}
-        ]
+        # Obter dados reais dos agentes se disponível
+        if BRIDGE_AVAILABLE:
+            try:
+                bridge = get_bridge()
+                agents = bridge.get_formatted_agents_data()
+                
+                # Se não houver dados, usar padrão
+                if not agents:
+                    agents = self.get_default_agents()
+            except Exception as e:
+                # Em caso de erro, usar dados padrão
+                agents = self.get_default_agents()
+        else:
+            # Bridge não disponível, usar dados padrão
+            agents = self.get_default_agents()
         
         for agent in agents:
             # Cor baseada no sinal
@@ -194,8 +313,21 @@ class EnhancedConsoleMonitor:
         
         # Consenso
         print(f"{Back.BLACK}{Fore.MAGENTA}{Style.BRIGHT}╠{'═' * 56}╣{Style.RESET_ALL}")
-        consensus_signal = "BUY"  # Simulado
-        consensus_confidence = 0.68
+        
+        # Obter consenso real se disponível
+        if BRIDGE_AVAILABLE:
+            try:
+                bridge = get_bridge()
+                consensus_data = bridge.get_consensus_data()
+                consensus_signal = consensus_data.get("action", "HOLD")
+                consensus_confidence = consensus_data.get("confidence", 0.5)
+            except:
+                consensus_signal = "HOLD"
+                consensus_confidence = 0.5
+        else:
+            consensus_signal = "HOLD"
+            consensus_confidence = 0.5
+        
         consensus_color = Fore.GREEN if consensus_signal == "BUY" else Fore.RED if consensus_signal == "SELL" else Fore.YELLOW
         
         print(f"{Fore.MAGENTA}║ {Style.BRIGHT}CONSENSUS:{Style.NORMAL} "
@@ -390,7 +522,15 @@ class EnhancedConsoleMonitor:
                 with open(metrics_file, 'r') as f:
                     data = json.load(f)
                     if 'metrics' in data:
-                        return data['metrics'].get('gauges', {})
+                        metrics = data['metrics'].get('gauges', {})
+                        # Atualizar metrics_data
+                        self.metrics_data.update({
+                            'ml_predictions': metrics.get('ml.predictions', 0),
+                            'hmarl_predictions': metrics.get('hmarl.predictions', 0),
+                            'features_calculated': metrics.get('features.calculated', 0),
+                            'trades_executed': metrics.get('trades.executed', 0)
+                        })
+                        return metrics
             except:
                 pass
         return {}
@@ -440,6 +580,9 @@ class EnhancedConsoleMonitor:
         
         # Features Panel (esquerda)
         self.draw_features_panel()
+        
+        # ML Panel (novo)
+        self.draw_ml_panel()
         
         # Agents Panel (direita - na mesma área)
         self.draw_agents_panel()

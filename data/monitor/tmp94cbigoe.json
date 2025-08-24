@@ -1,0 +1,44 @@
+{
+  "timestamp": "2025-08-22T10:25:09.203076",
+  "market_data": {
+    "price": 5479.25,
+    "volume": 0,
+    "book_data": {
+      "spread": 0.5,
+      "imbalance": -0.9640475025698902
+    }
+  },
+  "consensus": {
+    "action": "SELL",
+    "confidence": 0.6555404447886508,
+    "signal": -0.5074537044295201,
+    "weights": {
+      "OrderFlowSpecialist": 0.3,
+      "LiquidityAgent": 0.2,
+      "TapeReadingAgent": 0.25,
+      "FootprintPatternAgent": 0.25
+    }
+  },
+  "agents": {
+    "OrderFlowSpecialist": {
+      "signal": -1,
+      "confidence": 0.9134642617506669,
+      "weight": 0.3
+    },
+    "LiquidityAgent": {
+      "signal": -0.38921425077096705,
+      "confidence": 0.7530190437537361,
+      "weight": 0.2
+    },
+    "TapeReadingAgent": {
+      "signal": 0,
+      "confidence": 0.43358943005081385,
+      "weight": 0.25
+    },
+    "FootprintPatternAgent": {
+      "signal": 0,
+      "confidence": 0.49,
+      "weight": 0.25
+    }
+  }
+}
