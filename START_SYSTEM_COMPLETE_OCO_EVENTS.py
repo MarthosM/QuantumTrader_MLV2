@@ -30,6 +30,7 @@ load_dotenv('.env.production')
 
 # Importar novo sistema baseado em regime
 from src.trading.regime_based_strategy import RegimeBasedTradingSystem, RegimeSignal
+from src.trading.smart_targets_calculator import SmartTargetsCalculator
 
 # ============= SISTEMA DE EVENTOS INTEGRADO =============
 from src.events import (
@@ -189,6 +190,10 @@ class QuantumTraderCompleteOCOEvents:
         self.regime_system = RegimeBasedTradingSystem(min_confidence=self.min_confidence)
         logger.info("✓ Sistema de Trading Baseado em Regime inicializado")
         
+        # NOVO: Calculador inteligente de targets
+        self.smart_targets = SmartTargetsCalculator()
+        logger.info("✓ Calculador Inteligente de Targets inicializado")
+        
         # Bridge para monitor
         self.monitor_bridge = get_bridge() if get_bridge else None
         
@@ -229,6 +234,10 @@ class QuantumTraderCompleteOCOEvents:
             'max_drawdown': 0.0,
             'blocked_signals': 0,
             'hmarl_signals': 0,
+            # NOVO: Métricas de validação de tendência
+            'trades_blocked_by_trend': 0,
+            'trend_validations': 0,
+            'trend_aligned_trades': 0,
             'ml_signals': 0
         }
         
@@ -246,6 +255,15 @@ class QuantumTraderCompleteOCOEvents:
             logger.info(f"[EVENT] Ordem executada: {event.data}")
             # Atualizar métricas
             self.metrics['trades_today'] += 1
+            
+            # NOVO: Chamar handler de execução OCO
+            order_id = event.data.get('order_id')
+            if order_id:
+                self.handle_order_execution(order_id, "filled")
+                
+                # Marcar no OCO Monitor também
+                if hasattr(self.connection, 'oco_monitor'):
+                    self.connection.oco_monitor.mark_order_executed(order_id)
         
         # Handler para quando posição fecha
         @on_event(EventType.POSITION_CLOSED, priority=9)
@@ -530,12 +548,24 @@ class QuantumTraderCompleteOCOEvents:
                 return False
         
         if self.has_open_position:
+            logger.debug("[TRADE BLOCKED] Já existe posição aberta")
             self.metrics['blocked_signals'] += 1
             return False
         
         if len(self.active_orders) > 0:
+            logger.debug(f"[TRADE BLOCKED] Existem {len(self.active_orders)} ordens pendentes")
             self.metrics['blocked_signals'] += 1
             return False
+        
+        # NOVA PROTEÇÃO: Verificar se há grupos OCO ativos (ordens pendentes)
+        if self.connection and hasattr(self.connection, 'oco_monitor'):
+            if hasattr(self.connection.oco_monitor, 'oco_groups'):
+                active_oco_groups = sum(1 for g in self.connection.oco_monitor.oco_groups.values() 
+                                       if g.get('active', False))
+                if active_oco_groups > 0:
+                    logger.warning(f"[TRADE BLOCKED] Existem {active_oco_groups} grupos OCO pendentes ativos")
+                    self.metrics['blocked_signals'] += 1
+                    return False
         
         # Verificar tempo mínimo entre trades
         if self.last_trade_time:
@@ -596,11 +626,63 @@ class QuantumTraderCompleteOCOEvents:
                 logger.error("[ERRO] Sem preço real do mercado!")
                 return False
             
-            # Calcular stop/take - priorizar sistema de regime
+            # Calcular stop/take - priorizar SmartTargetsCalculator
             targets_calculated = False
             
-            # NOVO: Usar targets do sistema de regime (PRIORIDADE MÁXIMA)
-            if regime_signal and hasattr(regime_signal, 'stop_loss'):
+            # NOVO: Usar SmartTargetsCalculator para targets inteligentes
+            if self.smart_targets:
+                # Atualizar dados de preço
+                self.smart_targets.update_price_data(current_price)
+                
+                # Determinar tipo de sinal e trade
+                signal_source = 'hmarl_signal' if hmarl_consensus else 'regime_signal'
+                trade_type = 'scalping' if signal_source == 'hmarl_signal' else 'hybrid'
+                
+                # Preparar features do book
+                book_features = None
+                if len(self.book_buffer) > 0:
+                    last_book = self.book_buffer[-1]
+                    book_features = {
+                        'spread': last_book.get('spread', 0.5),
+                        'depth_imbalance': last_book.get('depth_imbalance', 0),
+                        'bid_levels_active': last_book.get('bid_levels', 5),
+                        'ask_levels_active': last_book.get('ask_levels', 5),
+                        'volume_ratio': last_book.get('volume_ratio', 1.0)
+                    }
+                
+                # Obter suporte/resistência do regime system
+                support_levels = []
+                resistance_levels = []
+                if regime_signal and hasattr(regime_signal, 'strategy'):
+                    # Tentar extrair níveis do sistema de regime
+                    if hasattr(self.regime_system, 'get_support_resistance'):
+                        sr_levels = self.regime_system.get_support_resistance()
+                        support_levels = sr_levels.get('supports', [])
+                        resistance_levels = sr_levels.get('resistances', [])
+                
+                # Calcular targets inteligentes
+                target_result = self.smart_targets.calculate_smart_targets(
+                    current_price=current_price,
+                    signal_type=signal,
+                    signal_source=signal_source,
+                    trade_type=trade_type,
+                    book_features=book_features,
+                    support_levels=support_levels,
+                    resistance_levels=resistance_levels
+                )
+                
+                stop_price = target_result.stop_loss
+                take_price = target_result.take_profit
+                targets_calculated = True
+                
+                logger.info(f"[SMART TARGETS] Calculados com sucesso")
+                logger.info(f"  Método: {signal_source} / {trade_type}")
+                logger.info(f"  Risk/Reward: {target_result.risk_reward:.2f}:1")
+                logger.info(f"  Confiança: {target_result.confidence:.1%}")
+                logger.info(f"  {target_result.reasoning}")
+            
+            # Fallback: Usar targets do sistema de regime se disponível
+            elif regime_signal and hasattr(regime_signal, 'stop_loss'):
                 stop_price = regime_signal.stop_loss
                 take_price = regime_signal.take_profit
                 targets_calculated = True
@@ -805,6 +887,64 @@ class QuantumTraderCompleteOCOEvents:
             logger.error(f"Erro no trade: {e}")
             return False
     
+    def handle_order_execution(self, order_id: int, execution_type: str = "unknown"):
+        """
+        Handler para quando uma ordem é executada
+        Cancela automaticamente a ordem OCO oposta
+        """
+        logger.warning(f"[ORDER EXECUTED] Ordem {order_id} executada - Tipo: {execution_type}")
+        
+        # Verificar se faz parte de um grupo OCO
+        if hasattr(self.connection, 'oco_monitor'):
+            oco_monitor = self.connection.oco_monitor
+            
+            # Procurar o grupo OCO desta ordem
+            for group_id, group in oco_monitor.oco_groups.items():
+                if not group.get('active', False):
+                    continue
+                
+                stop_id = group.get('stop_order_id') or group.get('stop')
+                take_id = group.get('take_order_id') or group.get('take')
+                
+                # Se a ordem executada é o stop, cancelar o take
+                if order_id == stop_id:
+                    logger.warning(f"[OCO HANDLER] STOP {stop_id} executado! Cancelando TAKE {take_id}")
+                    
+                    if take_id and self.connection.dll:
+                        try:
+                            # Cancelar take profit
+                            result = self.connection.dll.CancelOrder(take_id)
+                            logger.info(f"[OCO HANDLER] Take {take_id} cancelado: {result}")
+                        except Exception as e:
+                            logger.error(f"[OCO HANDLER] Erro cancelando take: {e}")
+                    
+                    # Marcar posição como fechada
+                    self.handle_position_closed("stop_executed")
+                    group['active'] = False
+                    break
+                    
+                # Se a ordem executada é o take, cancelar o stop
+                elif order_id == take_id:
+                    logger.warning(f"[OCO HANDLER] TAKE {take_id} executado! Cancelando STOP {stop_id}")
+                    
+                    if stop_id and self.connection.dll:
+                        try:
+                            # Cancelar stop loss
+                            result = self.connection.dll.CancelOrder(stop_id)
+                            logger.info(f"[OCO HANDLER] Stop {stop_id} cancelado: {result}")
+                        except Exception as e:
+                            logger.error(f"[OCO HANDLER] Erro cancelando stop: {e}")
+                    
+                    # Marcar posição como fechada
+                    self.handle_position_closed("take_executed")
+                    group['active'] = False
+                    break
+        
+        # Limpar ordens pendentes
+        if order_id in self.active_orders:
+            del self.active_orders[order_id]
+            logger.info(f"[OCO HANDLER] Ordem {order_id} removida de active_orders")
+    
     def handle_position_closed(self, reason="unknown"):
         """Limpa estado quando posição fecha e emite eventos"""
         global GLOBAL_POSITION_LOCK, GLOBAL_POSITION_LOCK_TIME
@@ -893,6 +1033,63 @@ class QuantumTraderCompleteOCOEvents:
         
         logger.info("[SISTEMA LIMPO] Pronto para nova posição")
     
+    def sync_with_oco_monitor(self):
+        """Sincroniza active_orders com status real do OCO Monitor"""
+        try:
+            if self.connection and hasattr(self.connection, 'oco_monitor'):
+                if hasattr(self.connection.oco_monitor, 'oco_groups'):
+                    active_groups = sum(1 for g in self.connection.oco_monitor.oco_groups.values() if g.get('active', False))
+                    
+                    if active_groups == 0 and self.active_orders:
+                        logger.info(f"[SYNC] OCO Monitor não tem grupos ativos mas active_orders tem {len(self.active_orders)} itens")
+                        logger.info("[SYNC] Limpando active_orders para sincronizar com OCO Monitor")
+                        self.active_orders.clear()
+                        
+                        # Se não há grupos OCO, não há posição
+                        if self.has_open_position:
+                            logger.info("[SYNC] Sem grupos OCO = sem posição. Limpando estado de posição.")
+                            self.has_open_position = False
+                            self.current_position = 0
+                            self.current_position_side = None
+                        
+                        return True  # Sincronização necessária
+                        
+                    elif active_groups > 0 and not self.active_orders:
+                        # CORREÇÃO CRÍTICA: Grupos OCO ativos = POSIÇÃO ABERTA!
+                        logger.warning(f"[SYNC] OCO Monitor tem {active_groups} grupos ativos mas active_orders está vazio")
+                        logger.warning("[SYNC] GRUPOS OCO ATIVOS = POSIÇÃO ABERTA NO MERCADO!")
+                        
+                        # Atualizar estado para refletir posição real
+                        if not self.has_open_position:
+                            logger.info("[SYNC] Marcando posição como ABERTA baseado em grupos OCO")
+                            self.has_open_position = True
+                            self.position_open_time = datetime.now()
+                            self.current_position = 1  # Assumir posição existe
+                        
+                        # Sincronizar ordens do OCO Monitor
+                        for group_id, group in self.connection.oco_monitor.oco_groups.items():
+                            if group.get('active', False):
+                                if group.get('stop_order_id'):
+                                    self.active_orders[group['stop_order_id']] = 'STOP'
+                                if group.get('take_order_id'):
+                                    self.active_orders[group['take_order_id']] = 'TAKE'
+                                logger.info(f"[SYNC] Grupo {group_id}: Stop={group.get('stop_order_id')}, Take={group.get('take_order_id')}")
+                        
+                        logger.info(f"[SYNC] Active orders atualizado com {len(self.active_orders)} ordens")
+                        return True  # Sincronização realizada
+                        
+                    elif active_groups > 0 and self.active_orders:
+                        # Tudo sincronizado - garantir que posição está marcada
+                        if not self.has_open_position:
+                            logger.warning("[SYNC] Grupos OCO e ordens ativas mas posição marcada como fechada. Corrigindo...")
+                            self.has_open_position = True
+                            self.position_open_time = datetime.now()
+                            
+            return False  # Sem mudanças
+        except Exception as e:
+            logger.error(f"[SYNC] Erro ao sincronizar com OCO Monitor: {e}")
+            return False
+    
     def position_consistency_check(self):
         """Thread que verifica consistência entre posição local e real"""
         logger.info("[CONSISTENCY] Thread de verificação de posição iniciada")
@@ -901,13 +1098,78 @@ class QuantumTraderCompleteOCOEvents:
             try:
                 time.sleep(10)  # Verificar a cada 10 segundos
                 
+                # Sincronizar com OCO Monitor primeiro
+                self.sync_with_oco_monitor()
+                
                 # Só verificar se sistema acha que tem posição
                 if self.has_open_position:
+                    # PROTEÇÃO: Não verificar posições muito novas (aguardar 30 segundos após abertura)
+                    if hasattr(self, 'position_open_time') and self.position_open_time:
+                        time_since_open = (datetime.now() - self.position_open_time).total_seconds()
+                        if time_since_open < 30:
+                            logger.debug(f"[CONSISTENCY] Posição muito nova ({time_since_open:.0f}s), aguardando...")
+                            continue
+                    
                     # Verificar se posição realmente existe
                     if self.connection and hasattr(self.connection, 'check_position_exists'):
                         has_position, quantity, side = self.connection.check_position_exists(self.symbol)
                         
                         if not has_position:
+                            # PROTEÇÃO ADICIONAL: Verificar se há ordens OCO ativas antes de considerar fantasma
+                            if hasattr(self, 'active_orders') and self.active_orders:
+                                # Verificar se OCO Monitor ainda tem grupos ativos
+                                active_oco_groups = 0
+                                if self.connection and hasattr(self.connection, 'oco_monitor'):
+                                    if hasattr(self.connection.oco_monitor, 'oco_groups'):
+                                        active_oco_groups = sum(1 for g in self.connection.oco_monitor.oco_groups.values() if g.get('active', False))
+                                
+                                if active_oco_groups > 0:
+                                    # ANÁLISE CRÍTICA: GetPosition disse false, mas temos grupos OCO
+                                    # NOVA POLÍTICA: Grupos OCO ativos SEMPRE indicam posição real
+                                    # NÃO cancelar automaticamente - apenas avisar
+                                    
+                                    logger.warning(f"[CONSISTENCY] GetPosition=false mas há {active_oco_groups} grupos OCO ativos")
+                                    logger.warning("[CONSISTENCY] MANTENDO POSIÇÃO - grupos OCO indicam posição REAL no mercado")
+                                    
+                                    # NÃO cancelar ordens - elas protegem uma posição real
+                                    # Apenas manter flag de posição aberta
+                                    self.has_open_position = True
+                                    
+                                    # Resetar qualquer timer de órfãs
+                                    if hasattr(self, '_oco_orphan_check_start'):
+                                        delattr(self, '_oco_orphan_check_start')
+                                    
+                                    # Log de aviso para operador verificar manualmente
+                                    if not hasattr(self, '_manual_check_warned'):
+                                        logger.warning("="*60)
+                                        logger.warning("[ATENÇÃO] VERIFICAR MANUALMENTE NO PROFITCHART:")
+                                        logger.warning("  1. Há posição aberta? (aba Posições)")
+                                        logger.warning("  2. Há ordens pendentes? (aba Ordens)")
+                                        logger.warning("  Se NÃO há posição: executar fix_clear_pending_orders.py")
+                                        logger.warning("="*60)
+                                        self._manual_check_warned = True
+                                    
+                                    continue
+                                else:
+                                    logger.warning(f"[CONSISTENCY] GetPosition false e sem grupos OCO ativos, mas active_orders tem {len(self.active_orders)} itens")
+                                    logger.info("[CONSISTENCY] Limpando active_orders órfãs")
+                                    self.active_orders.clear()
+                                    # Continuar para limpar posição fantasma
+                            
+                            # Verificação final via OCO Monitor
+                            has_oco_groups = False
+                            if self.connection and hasattr(self.connection, 'oco_monitor'):
+                                if hasattr(self.connection.oco_monitor, 'oco_groups'):
+                                    has_oco_groups = any(g.get('active', False) for g in self.connection.oco_monitor.oco_groups.values())
+                            
+                            if has_oco_groups:
+                                # NOVA POLÍTICA: OCO ativo = posição real (mesmo se GetPosition diz que não)
+                                logger.warning("[CONSISTENCY] Grupos OCO ativos detectados - MANTENDO como posição aberta")
+                                logger.warning("[CONSISTENCY] GetPosition pode estar incorreto - confiar nos grupos OCO")
+                                # NÃO cancelar - manter posição
+                                self.has_open_position = True
+                                continue
+                            
                             # Sistema acha que tem posição mas não tem!
                             logger.warning("[CONSISTENCY] INCONSISTÊNCIA DETECTADA: Sistema tem posição mas mercado não tem!")
                             logger.info("[CONSISTENCY] Limpando posição fantasma...")
@@ -943,9 +1205,68 @@ class QuantumTraderCompleteOCOEvents:
                 logger.error(f"[CONSISTENCY] Erro na verificação: {e}")
                 time.sleep(30)  # Esperar mais em caso de erro
     
+    def monitor_oco_executions(self):
+        """Thread dedicada para monitorar execuções de ordens OCO"""
+        logger.info("[OCO EXEC MONITOR] Thread iniciada - verificando execuções a cada 5s")
+        check_count = 0
+        
+        while self.running:
+            try:
+                time.sleep(5)  # Verificar a cada 5 segundos
+                check_count += 1
+                
+                if hasattr(self.connection, 'oco_monitor') and self.connection.oco_monitor.oco_groups:
+                    # Log periódico para confirmar que está rodando
+                    if check_count % 12 == 0:  # A cada minuto
+                        active_groups = sum(1 for g in self.connection.oco_monitor.oco_groups.values() if g.get('active'))
+                        logger.info(f"[OCO EXEC MONITOR] Monitorando {active_groups} grupos OCO ativos")
+                    
+                    for group_id, group in list(self.connection.oco_monitor.oco_groups.items()):
+                        if not group.get('active', False):
+                            continue
+                        
+                        stop_id = group.get('stop_order_id') or group.get('stop')
+                        take_id = group.get('take_order_id') or group.get('take')
+                        
+                        # Log detalhado a cada 30s
+                        if check_count % 6 == 0:
+                            logger.debug(f"[OCO EXEC MONITOR] Verificando grupo {group_id}: Stop={stop_id}, Take={take_id}")
+                        
+                        # Verificar status das ordens
+                        if stop_id and self.connection:
+                            stop_status = self.connection.get_order_status(stop_id)
+                            
+                            # Log do status para debug
+                            if check_count % 6 == 0:
+                                logger.debug(f"[OCO EXEC MONITOR] Stop {stop_id} status: {stop_status}")
+                            
+                            if stop_status in ["FILLED", "PARTIALLY_FILLED"]:
+                                logger.warning(f"[OCO EXEC MONITOR] STOP {stop_id} EXECUTADO! Status: {stop_status}")
+                                self.handle_order_execution(stop_id, "stop_filled")
+                                continue
+                        
+                        if take_id and self.connection:
+                            take_status = self.connection.get_order_status(take_id)
+                            
+                            # Log do status para debug
+                            if check_count % 6 == 0:
+                                logger.debug(f"[OCO EXEC MONITOR] Take {take_id} status: {take_status}")
+                            
+                            if take_status in ["FILLED", "PARTIALLY_FILLED"]:
+                                logger.warning(f"[OCO EXEC MONITOR] TAKE {take_id} EXECUTADO! Status: {take_status}")
+                                self.handle_order_execution(take_id, "take_filled")
+                                continue
+                        
+            except Exception as e:
+                logger.error(f"[OCO EXEC MONITOR] Erro: {e}")
+                time.sleep(10)
+    
     def cleanup_orphan_orders_loop(self):
         """Thread que verifica e cancela ordens órfãs periodicamente"""
         global GLOBAL_POSITION_LOCK, GLOBAL_POSITION_LOCK_TIME
+        
+        # Tracking de ordens já tentadas para evitar repetição
+        attempted_cancels = set()
         
         while self.running:
             try:
@@ -957,16 +1278,40 @@ class QuantumTraderCompleteOCOEvents:
                     
                     # Cancelar todas as ordens órfãs
                     for order_id in list(self.active_orders.keys()):
+                        # Pular se já tentamos cancelar esta ordem
+                        if order_id in attempted_cancels:
+                            self.active_orders.pop(order_id, None)
+                            continue
+                        
+                        attempted_cancels.add(order_id)
+                        
                         try:
                             if self.connection:
-                                self.connection.cancel_order(order_id)
-                                logger.info(f"[CLEANUP] Ordem órfã {order_id} cancelada")
+                                # Tentar cancelar a ordem
+                                result = self.connection.cancel_order(order_id)
+                                if result:
+                                    logger.info(f"[CLEANUP] Ordem órfã {order_id} cancelada com sucesso")
+                                else:
+                                    logger.debug(f"[CLEANUP] Ordem {order_id} pode já estar executada ou cancelada")
+                                
+                                # Remover do tracking independente do resultado
+                                self.active_orders.pop(order_id, None)
                         except Exception as e:
-                            logger.error(f"[CLEANUP] Erro ao cancelar {order_id}: {e}")
+                            if "INVALID_ARGS" not in str(e) and "-2147483645" not in str(e):
+                                logger.error(f"[CLEANUP] Erro ao cancelar {order_id}: {e}")
+                            # Remover mesmo com erro (pode já estar executada)
+                            self.active_orders.pop(order_id, None)
                     
-                    # Limpar dicionário
-                    self.active_orders.clear()
+                    # Garantir que está limpo
+                    if self.active_orders:
+                        logger.warning(f"[CLEANUP] Ainda restam {len(self.active_orders)} ordens, forçando limpeza")
+                        self.active_orders.clear()
+                    
                     logger.info("[CLEANUP] Estado de ordens limpo")
+                    
+                # Limpar tracking de tentativas quando não há ordens
+                if not self.active_orders and attempted_cancels:
+                    attempted_cancels.clear()
                 
                 # Verificar consistência do lock global
                 with GLOBAL_POSITION_LOCK_MUTEX:
@@ -1537,6 +1882,33 @@ class QuantumTraderCompleteOCOEvents:
                     # Obter consenso para salvar status
                     consensus = self.hmarl_agents.get_consensus()
                     
+                    # ATUALIZAR ARQUIVO hmarl_status.json
+                    if consensus:
+                        import json
+                        from datetime import datetime
+                        hmarl_data = {
+                            "timestamp": datetime.now().isoformat(),
+                            "market_data": {
+                                "price": current_price,
+                                "volume": self.total_volume,
+                                "book_data": {
+                                    "spread": book_data.get('ask_price_1', 5505) - book_data.get('bid_price_1', 5500),
+                                    "imbalance": hmarl_features.get('order_flow_imbalance_5', 0)
+                                }
+                            },
+                            "consensus": consensus,
+                            "agents": consensus.get('agents', {})
+                        }
+                        
+                        # Gravar arquivo no diretório correto para o monitor
+                        try:
+                            import os
+                            os.makedirs('data/monitor', exist_ok=True)
+                            with open('data/monitor/hmarl_status.json', 'w') as f:
+                                json.dump(hmarl_data, f, indent=2)
+                        except:
+                            pass  # Ignorar erros de gravação
+                    
                     if self._prediction_count <= 3:
                         logger.info(f"[HMARL] Atualizado com {buffer_size} amostras - Action: {consensus['action']}")
                     
@@ -1603,12 +1975,44 @@ class QuantumTraderCompleteOCOEvents:
                             logger.info(f"  Target: {regime_signal.take_profit:.2f}")
                             logger.info(f"  Risk/Reward: {regime_signal.risk_reward:.1f}:1")
                         
+                        # NOVO: Validação final de tendência antes de retornar o sinal
+                        # Mesmo que o regime system já valide, fazer uma dupla checagem aqui
+                        is_trend_valid, trend_reason = self.regime_system.validate_trend_alignment(
+                            ml_signal, regime_signal.regime, ml_confidence
+                        )
+                        
+                        if not is_trend_valid:
+                            logger.warning(f"[TREND BLOCK] Sinal final bloqueado: {trend_reason}")
+                            # Atualizar métricas
+                            if hasattr(self, 'metrics'):
+                                self.metrics['trades_blocked_by_trend'] = self.metrics.get('trades_blocked_by_trend', 0) + 1
+                            
+                            # Salvar status de bloqueio para o monitor
+                            ml_result = {
+                                'signal': 0,  # HOLD devido ao bloqueio
+                                'confidence': 0,
+                                'regime': regime_signal.regime.value,
+                                'strategy': 'blocked_by_trend',
+                                'block_reason': trend_reason
+                            }
+                            ml_predictions = {
+                                'context': {'regime': regime_signal.regime.value, 'confidence': 0},
+                                'microstructure': {'strategy': 'blocked', 'confidence': 0},
+                                'meta_learner': {'signal': 0, 'confidence': 0, 'blocked': True}
+                            }
+                            self._save_ml_status_for_monitor(ml_result, ml_predictions)
+                            self._save_regime_status_for_monitor(regime_signal)
+                            
+                            # Não gerar sinal de trade
+                            return {'signal': 0, 'confidence': 0.0}
+                        
                         # Salvar dados para o monitor (compatibilidade)
                         ml_result = {
                             'signal': ml_signal,
                             'confidence': ml_confidence,
                             'regime': regime_signal.regime.value,
-                            'strategy': regime_signal.strategy
+                            'strategy': regime_signal.strategy,
+                            'trend_validation': trend_reason  # Adicionar motivo da validação
                         }
                         ml_predictions = {
                             'context': {'regime': regime_signal.regime.value, 'confidence': ml_confidence},
@@ -1798,6 +2202,17 @@ class QuantumTraderCompleteOCOEvents:
                     # NOVO: Passar regime_signal se disponível
                     regime_signal = prediction.get('regime_signal', None)
                     
+                    # NOVO: Log de validação de tendência aprovada
+                    if regime_signal:
+                        trend_stats = self.regime_system.get_stats()
+                        logger.info(f"[TREND APPROVED] Trade alinhado com tendência")
+                        logger.info(f"  Regime: {trend_stats.get('current_regime', 'unknown')}")
+                        logger.info(f"  Consistência: {trend_stats.get('trend_consistency', 'N/A')}")
+                        logger.info(f"  Bloqueios: {trend_stats.get('trades_blocked_by_trend', 0)}/{trend_stats.get('total_validations', 0)}")
+                        
+                        # Atualizar métrica
+                        self.metrics['trend_aligned_trades'] += 1
+                    
                     self.execute_trade_with_oco(
                         signal=prediction['signal'],
                         confidence=prediction['confidence'],
@@ -1896,7 +2311,8 @@ class QuantumTraderCompleteOCOEvents:
             threading.Thread(target=self.metrics_loop, daemon=True, name="Metrics"),
             threading.Thread(target=self.data_collection_loop, daemon=True, name="DataCollection"),
             threading.Thread(target=self.cleanup_orphan_orders_loop, daemon=True, name="Cleanup"),
-            threading.Thread(target=self.position_consistency_check, daemon=True, name="Consistency")
+            threading.Thread(target=self.position_consistency_check, daemon=True, name="Consistency"),
+            threading.Thread(target=self.monitor_oco_executions, daemon=True, name="OCOExecMonitor")
         ]
         
         for thread in threads:
