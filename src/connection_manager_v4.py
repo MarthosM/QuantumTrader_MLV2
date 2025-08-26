@@ -21,6 +21,7 @@ from src.profit_dll_structures import (
     TConnectorTradeCallback, TConnectorOrderCallback, TConnectorAccountCallback,
     TStateCallback, TNewTradeCallback, THistoryTradeCallback, TProgressCallback,
     TPriceBookCallback, TOfferBookCallback, TAccountCallback,
+    TOfferBookCallbackV2, TPriceBookCallbackV2, TTradeCallbackV2,
     NResult, ConnectionState
 )
 
@@ -32,6 +33,7 @@ class ConnectionManagerV4:
         self.dll = None
         self.connected = False
         self.callbacks = {}
+        self.v2_callbacks = {}  # Store V2 callbacks to prevent garbage collection
         self.logger = logging.getLogger('ConnectionManagerV4')
         
         # Detectar modo de desenvolvimento
@@ -512,9 +514,12 @@ class ConnectionManagerV4:
                         # Notificar callbacks registrados
                         for callback in self.order_callbacks:
                             callback(order_data)
+                    
+                    return 0  # IMPORTANTE: Retornar 0 para sucesso
                             
                 except Exception as e:
                     self.logger.error(f"Erro no order callback v2: {e}")
+                    return -1  # Retornar -1 para erro
             
             # SetOrderHistoryCallback - para histórico de ordens
             @TConnectorAccountCallback
@@ -527,6 +532,8 @@ class ConnectionManagerV4:
                                        f"Account={account_id.AccountID}")
                 except Exception as e:
                     self.logger.error(f"Erro no order history callback v2: {e}")
+                # IMPORTANTE: Sempre retornar 0 para sucesso
+                return 0
             
             # Configurar callbacks V2 na DLL
             if hasattr(self.dll, 'SetOrderCallback'):
@@ -545,20 +552,123 @@ class ConnectionManagerV4:
             
             # SetTradeCallbackV2 se disponível
             if hasattr(self.dll, 'SetTradeCallbackV2'):
-                @TConnectorTradeCallback
+                @TTradeCallbackV2
                 def trade_callback_v2(trade_ptr):
                     try:
-                        # Usar TranslateTrade para processar dados
-                        # Por enquanto, apenas log
-                        self.logger.debug("Trade callback v2 chamado")
+                        # Log para debug
+                        self.logger.debug("Trade V2 callback recebido")
+                        
+                        # Por enquanto apenas log, pois precisamos descobrir a estrutura correta
+                        # ou usar TranslateTrade se disponível
+                        if trade_ptr:
+                            self.logger.debug("Trade V2 pointer recebido")
+                        
+                        return 0  # Success
                     except Exception as e:
                         self.logger.error(f"Erro no trade callback v2: {e}")
+                        return -1
                 
                 result = self.dll.SetTradeCallbackV2(trade_callback_v2)
                 if result == NResult.NL_OK:
-                    self.logger.info("[OK] SetTradeCallbackV2 configurado")
+                    self.logger.info("[OK] SetTradeCallbackV2 configurado com TTradeCallbackV2")
             
-            self.logger.info("Callbacks V2 configurados com sucesso")
+            # SetOfferBookCallbackV2 - versão mais recente do callback
+            if hasattr(self.dll, 'SetOfferBookCallbackV2'):
+                @TOfferBookCallbackV2
+                def offer_book_callback_v2(asset_id, action, position, side, qtd, agent,
+                                          offer_id, price, has_price, has_qtd, has_date,
+                                          has_offer_id, has_agent, date_ptr, array_sell, array_buy):
+                    """Callback V2 para book de ofertas com melhor suporte"""
+                    try:
+                        ticker_name = asset_id.pwcTicker if asset_id and hasattr(asset_id, 'pwcTicker') else 'N/A'
+                        
+                        # Processar dados do book
+                        book_data = {
+                            'timestamp': datetime.now(),
+                            'ticker': ticker_name,
+                            'action': action,  # 0=Adicionar, 1=Atualizar, 2=Remover
+                            'position': position,
+                            'side': side,  # 0=Buy, 1=Sell
+                            'quantity': qtd,
+                            'agent': agent,
+                            'offer_id': offer_id,
+                            'price': price,
+                            'has_price': bool(has_price),
+                            'has_quantity': bool(has_qtd)
+                        }
+                        
+                        # Notificar callback registrado
+                        if self._offer_book_callback:
+                            self._offer_book_callback(book_data)
+                        
+                        # Notificar book_update_callback se existir
+                        if hasattr(self, 'book_update_callback') and self.book_update_callback:
+                            self.book_update_callback(book_data)
+                        
+                        # Log apenas primeiras mensagens para debug
+                        if not hasattr(self, '_book_count'):
+                            self._book_count = 0
+                        self._book_count += 1
+                        
+                        if self._book_count <= 5:
+                            self.logger.info(f"[BOOK V2] {ticker_name} - Side: {side}, Price: {price}, Qty: {qtd}")
+                        elif self._book_count == 100:
+                            self.logger.info(f"[BOOK V2] Recebendo dados de book... ({self._book_count} mensagens)")
+                        
+                        return 0
+                    except Exception as e:
+                        self.logger.error(f"Erro no offer book callback v2: {e}")
+                        return 0
+                
+                result = self.dll.SetOfferBookCallbackV2(offer_book_callback_v2)
+                if result == NResult.NL_OK:
+                    self.logger.info("[OK] SetOfferBookCallbackV2 configurado")
+                else:
+                    self.logger.warning(f"[WARN] SetOfferBookCallbackV2 retornou: {result}")
+            
+            # SetPriceBookCallbackV2 - versão mais recente
+            if hasattr(self.dll, 'SetPriceBookCallbackV2'):
+                @TPriceBookCallbackV2
+                def price_book_callback_v2(asset_id, action, position, side, order_count,
+                                          qtd, display_qtd, price, array_sell, array_buy):
+                    """Callback V2 para book de preços agregado"""
+                    try:
+                        ticker_name = asset_id.pwcTicker if asset_id and hasattr(asset_id, 'pwcTicker') else 'N/A'
+                        
+                        book_data = {
+                            'timestamp': datetime.now(),
+                            'ticker': ticker_name,
+                            'action': action,
+                            'position': position,
+                            'side': side,
+                            'order_count': order_count,
+                            'quantity': qtd,
+                            'display_quantity': display_qtd,
+                            'price': price
+                        }
+                        
+                        if self._price_book_callback:
+                            self._price_book_callback(book_data)
+                        
+                        return 0
+                    except Exception as e:
+                        self.logger.error(f"Erro no price book callback v2: {e}")
+                        return 0
+                
+                result = self.dll.SetPriceBookCallbackV2(price_book_callback_v2)
+                if result == NResult.NL_OK:
+                    self.logger.info("[OK] SetPriceBookCallbackV2 configurado")
+            
+            # IMPORTANTE: Armazenar V2 callbacks para evitar garbage collection
+            self.v2_callbacks = {
+                'order': order_callback_v2,
+                'order_history': order_history_callback_v2,
+                'trade': trade_callback_v2,
+                'offer_book': offer_book_callback_v2,
+                'price_book': price_book_callback_v2
+            }
+            
+            self.logger.info("Callbacks V2 configurados e armazenados com sucesso")
             
         except Exception as e:
             self.logger.error(f"Erro configurando callbacks V2: {e}")
@@ -1118,11 +1228,10 @@ class ConnectionManagerV4:
                 self.logger.error("Market data não conectado - necessário para book")
                 return False
             
-            # SubscribeOfferBook(pwcTicker, pwcBolsa, nFeed)
+            # SubscribeOfferBook(pwcTicker, pwcBolsa) - apenas 2 parâmetros conforme manual
             result = self.dll.SubscribeOfferBook(
                 c_wchar_p(ticker),  # Ticker
-                c_wchar_p("F"),     # Bolsa (F=Futuros)
-                c_int(0)            # Feed (0=default)
+                c_wchar_p("F")      # Bolsa (F=Futuros)
             )
             
             if result == NResult.NL_OK:
@@ -1180,8 +1289,7 @@ class ConnectionManagerV4:
         try:
             result = self.dll.UnsubscribeOfferBook(
                 c_wchar_p(ticker),
-                c_wchar_p("F"),
-                c_int(0)
+                c_wchar_p("F")
             )
             return result == NResult.NL_OK
         except Exception as e:

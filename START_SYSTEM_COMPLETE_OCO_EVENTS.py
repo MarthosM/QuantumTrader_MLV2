@@ -188,11 +188,11 @@ class QuantumTraderCompleteOCOEvents:
         
         # NOVO: Sistema baseado em regime (substituindo ML defeituoso)
         self.regime_system = RegimeBasedTradingSystem(min_confidence=self.min_confidence)
-        logger.info("✓ Sistema de Trading Baseado em Regime inicializado")
+        logger.info("[OK] Sistema de Trading Baseado em Regime inicializado")
         
         # NOVO: Calculador inteligente de targets
         self.smart_targets = SmartTargetsCalculator()
-        logger.info("✓ Calculador Inteligente de Targets inicializado")
+        logger.info("[OK] Calculador Inteligente de Targets inicializado")
         
         # Bridge para monitor
         self.monitor_bridge = get_bridge() if get_bridge else None
@@ -223,6 +223,22 @@ class QuantumTraderCompleteOCOEvents:
         self.current_position_id = None  # NOVO: ID da posição
         self.active_orders = {}
         self.use_internal_tracking = False
+        
+        # Verificar flag de reset forçado
+        reset_flag_file = Path("data/monitor/force_position_reset.flag")
+        if reset_flag_file.exists():
+            logger.warning("[RESET] Flag de reset forçado detectado - limpando estado de posição")
+            self.has_open_position = False
+            self.current_position = 0
+            self.current_position_side = None
+            self.current_position_id = None
+            self.active_orders = {}
+            # Remover flag após processar
+            try:
+                reset_flag_file.unlink()
+                logger.info("[RESET] Flag de reset removido")
+            except:
+                pass
         
         # Métricas
         self.metrics = {
@@ -313,7 +329,7 @@ class QuantumTraderCompleteOCOEvents:
             try:
                 self.ml_predictor = HybridMLPredictor(models_dir="models/hybrid")
                 if self.ml_predictor.load_models():
-                    logger.info("✓ HybridMLPredictor carregado com sucesso")
+                    logger.info("[OK] HybridMLPredictor carregado com sucesso")
                     return True
                 else:
                     logger.warning("HybridMLPredictor não conseguiu carregar modelos")
@@ -444,19 +460,19 @@ class QuantumTraderCompleteOCOEvents:
             
             USERNAME = os.getenv('PROFIT_USERNAME', '')
             PASSWORD = os.getenv('PROFIT_PASSWORD', '')
+            KEY = os.getenv('PROFIT_KEY', '')
             
             # Configurar callback para receber atualizações de book
             self.connection.book_update_callback = self.process_book_update
             
-            if self.connection.initialize(username=USERNAME, password=PASSWORD):
+            if self.connection.initialize(username=USERNAME, password=PASSWORD, key=KEY):
                 print("  [OK] CONECTADO À B3!")
                 
                 # Aguardar broker (reduzido para 5 segundos)
                 print("  [*] Aguardando conexão com broker (máx 5s)...")
                 broker_connected = False
                 for i in range(5):
-                    status = self.connection.get_status()
-                    if status.get('broker', False):
+                    if hasattr(self.connection, 'routing_connected') and self.connection.routing_connected:
                         print(f"  [OK] Broker conectado após {i+1} segundos")
                         broker_connected = True
                         break
@@ -465,6 +481,42 @@ class QuantumTraderCompleteOCOEvents:
                 if not broker_connected:
                     print("  [AVISO] Broker não conectado - usando rastreamento interno")
                     self.use_internal_tracking = True
+                
+                # Aguardar Market Data antes de subscrever
+                print("\n  [*] Aguardando Market Data (máx 10s)...")
+                market_connected = False
+                for i in range(10):
+                    if hasattr(self.connection, 'market_connected') and self.connection.market_connected:
+                        print(f"  [OK] Market Data conectado após {i+1} segundos")
+                        market_connected = True
+                        break
+                    time.sleep(1)
+                
+                if not market_connected:
+                    print("  [AVISO] Market Data não conectado - tentando subscrever mesmo assim")
+                
+                # Aguardar mais 2 segundos para estabilizar antes de subscrever
+                print("  [*] Aguardando estabilização...")
+                time.sleep(2)
+                
+                # Subscrever ao book de ofertas após conexão
+                print(f"\n  [*] Subscrevendo ao book de {self.symbol}...")
+                if hasattr(self.connection, 'subscribe_offer_book'):
+                    if self.connection.subscribe_offer_book(self.symbol):
+                        print(f"  [OK] Subscrito ao offer book de {self.symbol}")
+                    else:
+                        print(f"  [AVISO] Não foi possível subscrever ao offer book")
+                
+                if hasattr(self.connection, 'subscribe_price_book'):
+                    if self.connection.subscribe_price_book(self.symbol):
+                        print(f"  [OK] Subscrito ao price book de {self.symbol}")
+                    else:
+                        print(f"  [AVISO] Não foi possível subscrever ao price book")
+                
+                # Subscrever também aos tickers para dados de mercado
+                if hasattr(self.connection, 'subscribe_ticker'):
+                    if self.connection.subscribe_ticker(self.symbol):
+                        print(f"  [OK] Subscrito aos ticks de {self.symbol}")
             else:
                 print("  [ERRO] Falha na conexão")
                 return False
@@ -548,7 +600,7 @@ class QuantumTraderCompleteOCOEvents:
                 return False
         
         if self.has_open_position:
-            logger.debug("[TRADE BLOCKED] Já existe posição aberta")
+            logger.info(f"[TRADE BLOCKED] Já existe posição aberta - Posição: {self.current_position} {self.current_position_side}")
             self.metrics['blocked_signals'] += 1
             return False
         
@@ -1332,17 +1384,44 @@ class QuantumTraderCompleteOCOEvents:
         """Obtém preço real do mercado"""
         current_price = 0
         
-        if self.connection and hasattr(self.connection, 'last_price'):
-            real_price = self.connection.last_price
-            if real_price > 0:
-                current_price = real_price
-        elif self.connection and hasattr(self.connection, 'best_bid') and hasattr(self.connection, 'best_ask'):
-            if self.connection.best_bid > 0 and self.connection.best_ask > 0:
-                current_price = (self.connection.best_bid + self.connection.best_ask) / 2.0
-        elif self.current_price > 1000:
-            current_price = self.current_price
+        # Prioridade 1: Usar último book update (mais confiável)
+        if self.last_book_update:
+            bid = self.last_book_update.get('bid_price_1', 0)
+            ask = self.last_book_update.get('ask_price_1', 0)
+            if bid > 4000 and ask > 4000:  # WDO geralmente acima de 4000
+                current_price = (bid + ask) / 2.0
+                logger.debug(f"[PRICE] Usando book: Bid={bid:.1f}, Ask={ask:.1f}, Mid={current_price:.1f}")
+                return current_price
         
-        return current_price
+        # Prioridade 2: Usar self.current_price se for válido
+        if self.current_price > 4000:  # WDO geralmente acima de 4000
+            logger.debug(f"[PRICE] Usando current_price: {self.current_price:.1f}")
+            return self.current_price
+            
+        # Prioridade 3: Usar last_mid_price
+        if self.last_mid_price > 4000:
+            logger.debug(f"[PRICE] Usando last_mid_price: {self.last_mid_price:.1f}")
+            return self.last_mid_price
+        
+        # Prioridade 4: Tentar connection manager (menos confiável)
+        if self.connection:
+            # Verificar se tem best_bid/best_ask
+            if hasattr(self.connection, 'best_bid') and hasattr(self.connection, 'best_ask'):
+                if self.connection.best_bid > 4000 and self.connection.best_ask > 4000:
+                    current_price = (self.connection.best_bid + self.connection.best_ask) / 2.0
+                    logger.debug(f"[PRICE] Usando connection bid/ask: {current_price:.1f}")
+                    return current_price
+            
+            # last_price como último recurso (pode estar desatualizado)
+            if hasattr(self.connection, 'last_price'):
+                real_price = self.connection.last_price
+                if real_price > 4000:  # Validar que está na faixa correta
+                    logger.debug(f"[PRICE] Usando connection.last_price: {real_price:.1f}")
+                    return real_price
+        
+        # Se chegou aqui, não tem preço válido
+        logger.warning(f"[PRICE] Nenhum preço válido encontrado! book_bid={self.last_book_update.get('bid_price_1', 0) if self.last_book_update else 0}, current={self.current_price}, mid={self.last_mid_price}")
+        return 0
     
     def _setup_data_recording(self):
         """Configura gravação de dados para treinamento"""
@@ -1468,63 +1547,94 @@ class QuantumTraderCompleteOCOEvents:
                 'signal': ml_result.get('signal', 0),
             }
             
+            # IMPORTANTE: Sempre garantir valores dinâmicos para as camadas
             # Adicionar predições das camadas se disponíveis
             if predictions:
-                # Context layer - usar prediction ao invés de regime
+                # Context layer - extrair valores corretos do dicionário
                 context = predictions.get('context', {})
-                context_pred = context.get('prediction', 0.5)
-                if context_pred > 0.6:
+                
+                # Context retorna regime (0,1,2) e confidence
+                context_regime = context.get('regime', None)
+                context_conf = context.get('regime_conf', None)
+                
+                if context_regime is None or context_conf is None:
+                    # Buscar confidence com chave alternativa
+                    context_conf = context.get('confidence', 0.5)
+                    if context_regime is None:
+                        context_regime = 1  # Default para HOLD
+                    logger.warning(f"[ML STATUS] Context predictions ajustadas: regime={context_regime}, conf={context_conf}")
+                
+                # Converter regime para sinal de trading
+                if context_regime == 2:  # Assumindo 2 = bull trend
                     ml_status['context_pred'] = 'BUY'
-                elif context_pred < 0.4:
+                elif context_regime == 0:  # Assumindo 0 = bear trend
                     ml_status['context_pred'] = 'SELL'
+                elif context_regime == 'undefined':  # Handle undefined
+                    ml_status['context_pred'] = 'HOLD'
                 else:
                     ml_status['context_pred'] = 'HOLD'
-                ml_status['context_conf'] = float(context.get('confidence', context_pred))
                 
-                # Microstructure layer - usar prediction ao invés de order_flow
+                # Garantir que context_conf não é None antes de converter
+                if context_conf is not None:
+                    ml_status['context_conf'] = float(context_conf)
+                else:
+                    ml_status['context_conf'] = 0.5
+                
+                # Microstructure layer - usar order_flow corretamente
                 micro = predictions.get('microstructure', {})
-                micro_pred = micro.get('prediction', 0.5)
-                if micro_pred > 0.6:
+                order_flow = micro.get('order_flow', None)  # -1, 0, 1
+                order_flow_conf = micro.get('order_flow_conf', None)
+                
+                if order_flow is None or order_flow_conf is None:
+                    # Buscar confidence com chave alternativa
+                    order_flow_conf = micro.get('confidence', 0.5)
+                    if order_flow is None:
+                        order_flow = 0  # Default para HOLD
+                    logger.warning(f"[ML STATUS] Micro predictions ajustadas: order_flow={order_flow}, conf={order_flow_conf}")
+                
+                # Garantir que order_flow é um número para comparação
+                if order_flow is not None and order_flow > 0:
                     ml_status['micro_pred'] = 'BUY'
-                elif micro_pred < 0.4:
+                elif order_flow < 0:
                     ml_status['micro_pred'] = 'SELL'
                 else:
                     ml_status['micro_pred'] = 'HOLD'
-                ml_status['micro_conf'] = float(micro.get('confidence', micro_pred))
                 
-                # Meta layer
-                meta = predictions.get('meta_learner', {})
-                meta_signal = meta.get('signal', 0)
-                ml_status['meta_pred'] = self._convert_signal_to_text(meta_signal)
-            else:
-                # Se não há predições, adicionar valores variáveis baseados no mercado
-                if self.last_book_update:
-                    imbalance = self.last_book_update.get('imbalance', 0)
-                    # Gerar predições baseadas no imbalance do book
-                    if imbalance > 0.1:
-                        ml_status['context_pred'] = 'BUY'
-                        ml_status['micro_pred'] = 'BUY'
-                        ml_status['context_conf'] = 0.5 + abs(imbalance) * 0.3
-                        ml_status['micro_conf'] = 0.5 + abs(imbalance) * 0.4
-                    elif imbalance < -0.1:
-                        ml_status['context_pred'] = 'SELL'
-                        ml_status['micro_pred'] = 'SELL'
-                        ml_status['context_conf'] = 0.5 + abs(imbalance) * 0.3
-                        ml_status['micro_conf'] = 0.5 + abs(imbalance) * 0.4
+                # Garantir que order_flow_conf não é None antes de converter
+                if order_flow_conf is not None:
+                    ml_status['micro_conf'] = float(order_flow_conf)
+                else:
+                    ml_status['micro_conf'] = 0.5
+                
+                # Meta layer - predictions.meta é um valor float direto
+                meta_value = predictions.get('meta', 0)
+                if isinstance(meta_value, (int, float)):
+                    if meta_value > 0.3:
+                        ml_status['meta_pred'] = 'BUY'
+                    elif meta_value < -0.3:
+                        ml_status['meta_pred'] = 'SELL'
                     else:
-                        ml_status['context_pred'] = 'HOLD'
-                        ml_status['micro_pred'] = 'HOLD'
-                        ml_status['context_conf'] = 0.5
-                        ml_status['micro_conf'] = 0.5
-                    
-                    ml_status['meta_pred'] = ml_status['micro_pred']
+                        ml_status['meta_pred'] = 'HOLD'
+                else:
+                    ml_status['meta_pred'] = 'HOLD'
+            else:
+                # Se não há predições reais, usar valores padrão indicando falta de dados
+                ml_status['context_pred'] = 'NO_DATA'
+                ml_status['context_conf'] = 0.0
+                ml_status['micro_pred'] = 'NO_DATA'
+                ml_status['micro_conf'] = 0.0
+                ml_status['meta_pred'] = 'NO_DATA'
+                
+                logger.warning("[ML STATUS] Sem predições reais disponíveis - modelos não estão gerando dados")
             
-            # Log para debug
-            if self._prediction_count % 20 == 0:
-                logger.info(f"[ML STATUS SAVE] Predictions: {self._prediction_count}")
+            # Log para debug  
+            if self._prediction_count % 10 == 0:
+                logger.info(f"[ML STATUS SAVE] Count: {self._prediction_count}, Has predictions: {bool(predictions and len(predictions) > 0)}")
                 logger.info(f"  Context: {ml_status.get('context_pred')} ({ml_status.get('context_conf', 0):.2%})")
                 logger.info(f"  Micro: {ml_status.get('micro_pred')} ({ml_status.get('micro_conf', 0):.2%})")
                 logger.info(f"  Meta: {ml_status.get('meta_pred')}")
+                if predictions:
+                    logger.info(f"  Predictions keys: {list(predictions.keys())}")
             
             # Salvar em arquivo para o monitor
             monitor_dir = Path('data/monitor')
@@ -1771,17 +1881,70 @@ class QuantumTraderCompleteOCOEvents:
             return
         
         try:
-            # Verificar posição
-            if self.use_internal_tracking:
-                position = self.connection.get_position_safe(self.symbol)
-            else:
-                try:
-                    position = self.connection.get_position(self.symbol)
-                except:
-                    self.use_internal_tracking = True
-                    position = self.connection.get_position_safe(self.symbol)
+            # Primeiro verificar se há grupos OCO ativos
+            has_active_oco = False
+            if hasattr(self.connection, 'oco_monitor') and self.connection.oco_monitor:
+                active_groups = sum(1 for g in self.connection.oco_monitor.oco_groups.values() 
+                                   if g.get('active', False))
+                has_active_oco = active_groups > 0
+                
+                # Se tinha OCO ativo mas agora não tem mais, provavelmente posição fechou
+                if not has_active_oco and hasattr(self, '_last_oco_check'):
+                    if self._last_oco_check:
+                        logger.info("[OCO CHECK] Grupos OCO foram desativados - posição provavelmente fechada")
+                self._last_oco_check = has_active_oco
             
-            if position:
+            # Verificar posição real
+            position = None
+            try:
+                # Tentar check_position_exists primeiro (mais confiável)
+                if hasattr(self.connection, 'check_position_exists'):
+                    has_pos, qty, side = self.connection.check_position_exists(self.symbol)
+                    if has_pos:
+                        position = {'quantity': qty, 'side': side}
+                # Fallback para get_position
+                elif self.use_internal_tracking:
+                    position = self.connection.get_position_safe(self.symbol)
+                else:
+                    try:
+                        position = self.connection.get_position(self.symbol)
+                    except:
+                        self.use_internal_tracking = True
+                        position = self.connection.get_position_safe(self.symbol)
+            except Exception as e:
+                logger.warning(f"Erro ao verificar posição: {e}")
+            
+            # IMPORTANTE: Se não há posição E não há OCO ativo, resetar estado
+            if not position and not has_active_oco:
+                if self.has_open_position:
+                    # Posição foi fechada
+                    logger.info("[POSIÇÃO FECHADA] Detectado fechamento - sem posição e sem OCO ativo")
+                    
+                    # IMPORTANTE: Cancelar todas as ordens pendentes do símbolo
+                    try:
+                        if self.connection:
+                            # Cancelar ordens pendentes
+                            self.connection.cancel_all_pending_orders(self.symbol)
+                            logger.info(f"[OK] Ordens pendentes de {self.symbol} canceladas")
+                            
+                            # Limpar tracking de ordens no OrderManager
+                            if self.order_manager:
+                                self.order_manager.clear_pending_orders()
+                                logger.info("[OK] OrderManager limpo")
+                    except Exception as e:
+                        logger.error(f"Erro ao cancelar ordens pendentes: {e}")
+                    
+                    # Chamar handler de posição fechada
+                    self.handle_position_closed("position_check")
+                    
+                    # Resetar estado
+                    self.has_open_position = False
+                    self.current_position = 0
+                    self.current_position_side = None
+                    self.current_position_id = None
+                    logger.info("[OK] Estado resetado - sistema pronto para novos trades")
+            
+            elif position:
                 # Tem posição
                 if not self.has_open_position:
                     # Nova posição detectada
@@ -1802,33 +1965,12 @@ class QuantumTraderCompleteOCOEvents:
                 self.has_open_position = True
                 self.current_position = position['quantity'] if position['side'] == 'BUY' else -position['quantity']
                 self.current_position_side = position['side']
-                
-            else:
-                # Sem posição
-                if self.has_open_position:
-                    # Posição foi fechada
-                    logger.info("[POSIÇÃO FECHADA] Cancelando ordens pendentes...")
-                    
-                    # IMPORTANTE: Cancelar todas as ordens pendentes do símbolo
-                    try:
-                        if self.connection:
-                            # Cancelar ordens pendentes
-                            self.connection.cancel_all_pending_orders(self.symbol)
-                            logger.info(f"[OK] Ordens pendentes de {self.symbol} canceladas")
-                            
-                            # Limpar tracking de ordens no OrderManager
-                            if self.order_manager:
-                                self.order_manager.clear_pending_orders()
-                                logger.info("[OK] OrderManager limpo")
-                    except Exception as e:
-                        logger.error(f"Erro ao cancelar ordens pendentes: {e}")
-                    
-                    # Chamar handler de posição fechada
-                    self.handle_position_closed("position_check")
-                
-                self.has_open_position = False
-                self.current_position = 0
-                self.current_position_side = None
+            
+            # Se tem OCO ativo mas não detecta posição, manter estado atual
+            elif has_active_oco:
+                if not self.has_open_position:
+                    logger.debug("[OCO CHECK] OCO ativo detectado - provavelmente há posição")
+                    # Não mudar estado - OCO indica posição existe
                 
         except Exception as e:
             logger.error(f"Erro ao verificar posição: {e}")
@@ -1923,6 +2065,9 @@ class QuantumTraderCompleteOCOEvents:
                 return {'signal': 0, 'confidence': 0.0}
             
             # ==== NOVO SISTEMA BASEADO EM REGIME ====
+            # Gerar features para uso em ML e HMARL
+            hmarl_features = self._generate_hmarl_features() if self.last_book_update else {}
+            
             # 1. Obter sinal HMARL para timing
             hmarl_signal = None
             hmarl_confidence = 0.5
@@ -1947,17 +2092,83 @@ class QuantumTraderCompleteOCOEvents:
             ml_signal = 0
             ml_confidence = 0.0
             
-            # Usar sistema de regime ao invés de ML defeituoso
+            # Usar sistema híbrido ML + regime
             if self.last_book_update and buffer_size >= 20:
                 try:
                     current_price = (self.last_book_update.get('bid_price_1', 5500) + 
                                    self.last_book_update.get('ask_price_1', 5505)) / 2
                     
-                    # Obter sinal baseado em regime (sem log excessivo)
-                    regime_signal = self.regime_system.get_trading_signal(
-                        current_price=current_price,
-                        hmarl_signal=hmarl_signal
-                    )
+                    # Tentar usar ML predictor primeiro se disponível
+                    ml_prediction = None
+                    if hasattr(self, 'ml_predictor') and self.ml_predictor:
+                        try:
+                            # Calcular features para ML
+                            features = self._calculate_features_from_buffer()
+                            
+                            # Adicionar features do HMARL se disponíveis
+                            if hmarl_features:
+                                features.update(hmarl_features)
+                            
+                            # Fazer predição ML
+                            ml_prediction = self.ml_predictor.predict(features)
+                            
+                            # Log detalhado para debug das predições
+                            if ml_prediction:
+                                predictions_data = ml_prediction.get('predictions', {})
+                                if predictions_data:
+                                    context_data = predictions_data.get('context', {})
+                                    micro_data = predictions_data.get('microstructure', {})
+                                    meta_data = predictions_data.get('meta')
+                                    
+                                    # Log apenas a cada 30 segundos para não poluir
+                                    if not hasattr(self, '_last_ml_debug_log') or (datetime.now() - self._last_ml_debug_log).total_seconds() > 30:
+                                        self._last_ml_debug_log = datetime.now()
+                                        logger.info("[ML DEBUG] Predictions recebidas do ML:")
+                                        logger.info(f"  - Context: regime={context_data.get('regime')}, conf={context_data.get('regime_conf', 0):.2%}")
+                                        logger.info(f"  - Micro: order_flow={micro_data.get('order_flow')}, conf={micro_data.get('order_flow_conf', 0):.2%}")
+                                        logger.info(f"  - Meta: {meta_data}")
+                                        logger.info(f"  - Signal: {ml_prediction.get('signal')}, Confidence: {ml_prediction.get('confidence', 0):.2%}")
+                            
+                            if ml_prediction and ml_prediction.get('signal') != 0:
+                                ml_signal = ml_prediction['signal']
+                                ml_confidence = ml_prediction['confidence']
+                                
+                                # Log ML prediction - sempre logar para debug
+                                if self._prediction_count % 10 == 0:
+                                    logger.info(f"[ML] Signal: {ml_signal}, Confidence: {ml_confidence:.2%}")
+                                    if 'predictions' in ml_prediction:
+                                        preds = ml_prediction['predictions']
+                                        logger.info(f"  Context: {preds.get('context', {})}")
+                                        logger.info(f"  Micro: {preds.get('microstructure', {})}")
+                                    else:
+                                        logger.warning("[ML] Predictions não encontradas no retorno do ML")
+                        except Exception as e:
+                            logger.debug(f"ML prediction error: {e}")
+                            ml_prediction = None
+                    
+                    # Sempre salvar status ML para monitor (mesmo quando sinal = 0)
+                    if ml_prediction:
+                        # Salvar ML status para monitor
+                        self._save_ml_status_for_monitor(ml_prediction, ml_prediction.get('predictions', {}))
+                        
+                        # Criar regime_signal compatível para o resto do código
+                        from src.trading.regime_based_strategy import RegimeSignal, MarketRegime
+                        regime_signal = type('obj', (object,), {
+                            'regime': MarketRegime.UNDEFINED,
+                            'signal': ml_signal,
+                            'confidence': ml_confidence,
+                            'strategy': 'ml_hybrid',
+                            'entry_price': current_price,
+                            'stop_loss': current_price * 0.995,
+                            'take_profit': current_price * 1.01,
+                            'risk_reward': 2.0
+                        })()
+                    else:
+                        # Se ML não disponível ou não gerou sinal, usar regime system
+                        regime_signal = self.regime_system.get_trading_signal(
+                            current_price=current_price,
+                            hmarl_signal=hmarl_signal
+                        )
                     
                     if regime_signal:
                         # Converter sinal de regime para formato esperado
@@ -2174,6 +2385,8 @@ class QuantumTraderCompleteOCOEvents:
         
         # Contador para debug
         loop_count = 0
+        error_count = 0
+        max_errors = 10
         
         while self.running:
             try:
@@ -2187,13 +2400,16 @@ class QuantumTraderCompleteOCOEvents:
                 prediction = self.make_hybrid_prediction()
                 self.metrics['predictions_today'] += 1
                 
+                # Reset error count on success
+                error_count = 0
+                
                 # Log da predição
                 if loop_count <= 5:
                     logger.info(f"[TRADING LOOP] Predição: signal={prediction['signal']}, confidence={prediction['confidence']:.2%}")
                 
                 # Executar trade se sinal válido
                 if prediction['signal'] != 0 and prediction['confidence'] >= self.min_confidence:
-                    logger.info(f"[TRADING LOOP] Sinal válido! Executando trade...")
+                    logger.info(f"[TRADING LOOP] Sinal válido detectado! Signal={prediction['signal']}, Conf={prediction['confidence']:.1%}")
                     
                     # Preparar dados para sistema de otimização
                     ml_pred = prediction.get('ml_data', {'signal': prediction['signal'], 'confidence': prediction['confidence']})
@@ -2224,11 +2440,21 @@ class QuantumTraderCompleteOCOEvents:
                 time.sleep(1)
                 
             except Exception as e:
-                logger.error(f"[TRADING LOOP] Erro no trading: {e}")
+                error_count += 1
+                logger.error(f"[TRADING LOOP] Erro no trading ({error_count}/{max_errors}): {e}")
                 import traceback
-                if loop_count <= 5:
+                if loop_count <= 5 or error_count <= 3:
                     traceback.print_exc()
+                
+                # Se muitos erros, parar thread
+                if error_count >= max_errors:
+                    logger.error(f"[TRADING LOOP] Muitos erros ({error_count}), parando thread")
+                    self.running = False
+                    break
+                    
                 time.sleep(5)
+        
+        logger.info("[TRADING LOOP] Thread de trading finalizada")
     
     def metrics_loop(self):
         """Loop de métricas com eventos"""
@@ -2391,8 +2617,14 @@ def main():
             print("Execute 'python test_event_system.py' em outro terminal para testar eventos")
             
             # Manter rodando
-            while True:
+            while system.running:
                 time.sleep(1)
+                # Verificar se threads estão vivas
+                if hasattr(system, 'trading_thread') and not system.trading_thread.is_alive():
+                    logger.error("Thread de trading morreu!")
+                    break
+                    
+            print("\n[!] Sistema parou")
                 
     except KeyboardInterrupt:
         print("\n[!] Parando...")
@@ -2402,7 +2634,8 @@ def main():
         print(f"\n[ERRO] {e}")
         import traceback
         traceback.print_exc()
-        system.stop()
+        if 'system' in locals():
+            system.stop()
 
 
 if __name__ == "__main__":
