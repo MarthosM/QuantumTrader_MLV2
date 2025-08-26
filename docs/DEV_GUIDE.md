@@ -1659,6 +1659,187 @@ cat hmarl_status.json | python -m json.tool | head -20
 
 ---
 
+## 🆕 Atualizações v4.2 (26/08/2025 - Correções Críticas OCO e Callbacks)
+
+### 🔧 Correções de Callbacks ProfitDLL
+
+1. **✅ Correção Critical: Callbacks devem retornar inteiros**
+   ```python
+   # ERRO ANTERIOR:
+   def order_history_callback_v2(account_id_ptr):
+       # ... processamento ...
+       # Sem retorno = None = TypeError no Windows
+   
+   # CORREÇÃO:
+   def order_history_callback_v2(account_id_ptr):
+       try:
+           # ... processamento ...
+       except Exception as e:
+           self.logger.error(f"Erro: {e}")
+       return 0  # SEMPRE retornar 0 (sucesso) ou 1 (erro)
+   ```
+
+2. **📌 Regra Fundamental para Callbacks ctypes**
+   - **Windows x64**: TODOS callbacks devem retornar valor inteiro
+   - **Convenção**: 0 = sucesso, 1 = erro
+   - **Sem retorno**: Python retorna None → ctypes tenta converter → TypeError
+   - **Impacto**: Callbacks sem retorno podem travar ou crashar o sistema
+
+3. **🔍 Callbacks Corrigidos**
+   ```python
+   # src/connection_manager_v4.py
+   
+   # Callback de histórico de ordens
+   def order_history_callback_v2(self, account_id_ptr):
+       # ... processamento ...
+       return 0  # OBRIGATÓRIO
+   
+   # Callback de estado
+   def state_callback(broker_id, routing_id):
+       # ... processamento ...
+       return 0  # OBRIGATÓRIO
+   
+   # Callback de book
+   def book_callback(asset_id, bid, ask):
+       # ... processamento ...
+       return 0  # OBRIGATÓRIO
+   ```
+
+### 🎯 Correção de Detecção de Posições Fechadas
+
+1. **❌ Problema**: Sistema não resetava `has_open_position` após fechamento
+   ```python
+   # ANTES: Só verificava GetPosition
+   position = self.connection.get_position(symbol)
+   if not position:
+       # Assumia que não tinha posição (ERRADO!)
+   ```
+
+2. **✅ Solução**: Verificar grupos OCO ativos também
+   ```python
+   # DEPOIS: Verifica posição E grupos OCO
+   def check_position_status(self):
+       # 1. Verificar grupos OCO ativos
+       has_active_oco = False
+       if self.connection.oco_monitor:
+           active_groups = sum(1 for g in oco_monitor.oco_groups.values() 
+                              if g.get('active'))
+           has_active_oco = active_groups > 0
+       
+       # 2. Verificar posição real
+       position = self.connection.check_position_exists(symbol)
+       
+       # 3. Só reseta se NÃO tem posição E NÃO tem OCO
+       if not position and not has_active_oco:
+           self.has_open_position = False  # Agora sim pode resetar
+   ```
+
+### 💰 Correção de Preços Incorretos
+
+1. **❌ Problema**: Sistema usando preço 2726 quando mercado estava em 5452
+   ```python
+   # ANTES: Confiava em connection.last_price (desatualizado)
+   def _get_real_market_price(self):
+       if self.connection.last_price > 0:
+           return self.connection.last_price  # Podia ter valor antigo!
+   ```
+
+2. **✅ Solução**: Hierarquia de fontes confiáveis
+   ```python
+   def _get_real_market_price(self):
+       # Prioridade 1: Book update (mais recente)
+       if self.last_book_update:
+           bid = self.last_book_update.get('bid_price_1', 0)
+           ask = self.last_book_update.get('ask_price_1', 0)
+           if bid > 4000 and ask > 4000:  # WDO > 4000
+               return (bid + ask) / 2.0
+       
+       # Prioridade 2: current_price atualizado
+       if self.current_price > 4000:
+           return self.current_price
+       
+       # Prioridade 3: last_mid_price
+       if self.last_mid_price > 4000:
+           return self.last_mid_price
+       
+       # Última opção: connection (menos confiável)
+       # ... com validação > 4000
+   ```
+
+### 🔄 Script de Reset Manual
+
+**Arquivo**: `reset_position_state.py`
+```python
+# Uso: Quando sistema trava com posição fantasma
+python reset_position_state.py
+
+# O que faz:
+# 1. Backup do position_status.json
+# 2. Limpa estado de posições
+# 3. Desativa grupos OCO órfãos
+# 4. Cria flag para reset no próximo startup
+```
+
+### 📝 Estrutura Correta de Callbacks ProfitDLL v4.0.0.30
+
+```python
+from ctypes import WINFUNCTYPE, POINTER, c_int, c_longlong, c_double, c_wchar_p
+
+# Definição dos tipos de callback
+StateCallbackType = WINFUNCTYPE(c_int, c_int, c_int)  # Retorna int!
+HistoryCallbackType = WINFUNCTYPE(c_int, c_int, c_wchar_p, c_int, c_int, c_longlong)
+OrderCallbackType = WINFUNCTYPE(c_int, c_int, c_longlong, c_int, c_double, c_double, c_int, c_wchar_p)
+BookCallbackType = WINFUNCTYPE(c_int, POINTER(TAssetIDRec), c_int)
+TradeCallbackType = WINFUNCTYPE(c_int, POINTER(TAssetIDRec), c_wchar_p, c_double, c_longlong, c_int, c_int)
+
+# Implementação correta
+@StateCallbackType
+def state_callback(broker_id, routing_id):
+    try:
+        if broker_id == 1:
+            print(f"Broker conectado: ID={routing_id}")
+        # ... processamento ...
+    except Exception as e:
+        print(f"Erro no callback: {e}")
+    return 0  # OBRIGATÓRIO: 0=sucesso, 1=erro
+
+# Registro no DLL
+dll.DLLInitializeLogin(
+    key, username, password,
+    state_callback,  # Callback de estado
+    history_callback,  # Callback de histórico
+    order_callback,  # Callback de ordens
+    # ...
+)
+```
+
+### 📋 Checklist de Verificação
+
+```bash
+# 1. Verificar callbacks funcionando
+grep "callback.*return" src/connection_manager_v4.py
+
+# 2. Verificar detecção de posições
+grep "has_open_position\|OCO CHECK" logs/*.log | tail -20
+
+# 3. Verificar preços corretos (devem ser > 4000)
+grep "Entry:" logs/*.log | tail -10
+
+# 4. Verificar ordens OCO sendo enviadas
+grep "OCO.*enviadas\|ORDEM BRACKET" logs/*.log | tail -10
+
+# 5. Status de posição atual
+cat data/monitor/position_status.json
+
+# 6. Verificar erros de callback
+grep "TypeError.*NoneType.*integer" logs/*.log | tail -5
+
+# 7. Verificar reset de posição
+python reset_position_state.py  # Se necessário
+```
+
+---
+
 ## 📊 Atualizações v4.1 (20/08/2025 - Otimizações do Sistema de Regime)
 
 ### Melhorias na Geração de Sinais
