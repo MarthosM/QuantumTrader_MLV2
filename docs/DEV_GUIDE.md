@@ -1,6 +1,130 @@
-# 🔧 Developer Guide - QuantumTrader Production v4.0
+# 🔧 Developer Guide - QuantumTrader Production v4.1
 
-## Arquitetura e Desenvolvimento do Sistema Baseado em Regime com HMARL
+## Arquitetura e Desenvolvimento do Sistema Híbrido ML + HMARL com Dados Reais
+
+---
+
+## 🆕 Atualizações v4.1 (26/08/2025 - Conexão com Dados Reais)
+
+### 🎯 MUDANÇA CRÍTICA: Implementação de Conexão Real com ProfitDLL
+
+#### ✅ PROBLEMA RESOLVIDO: Sistema Agora Recebe Dados Reais do Mercado!
+
+### 📡 Como Obter Dados Reais do Mercado através da DLL
+
+#### 1. **Arquitetura de Conexão que Funciona**
+
+O sistema DEVE usar a seguinte abordagem (baseada no `book_collector.py` funcional):
+
+```python
+# CRÍTICO: Usar ConnectionManagerWorking ao invés de ConnectionManagerV4
+from src.connection_manager_working import ConnectionManagerWorking
+
+# Estrutura simplificada que funciona
+class TAssetIDRec(Structure):
+    _fields_ = [
+        ("ticker", c_wchar * 35),
+        ("bolsa", c_wchar * 15),
+    ]
+```
+
+#### 2. **Sequência Correta de Inicialização**
+
+```python
+def connect():
+    # 1. Carregar DLL
+    dll = WinDLL("ProfitDLL64.dll")
+    
+    # 2. CRIAR CALLBACKS ANTES DO LOGIN (CRÍTICO!)
+    callbacks = _create_all_callbacks()
+    
+    # 3. Usar DLLInitializeLogin com callbacks
+    result = dll.DLLInitializeLogin(
+        key, user, pwd,
+        callbacks['state'],      # stateCallback
+        None,                    # historyCallback
+        None,                    # orderChangeCallback
+        None,                    # accountCallback
+        None,                    # accountInfoCallback
+        callbacks['daily'],      # newDailyCallback
+        callbacks['price_book'], # priceBookCallback
+        callbacks['offer_book'], # offerBookCallback
+        None,                    # historyTradeCallback
+        None,                    # progressCallBack
+        callbacks['tiny_book']   # tinyBookCallBack
+    )
+    
+    # 4. Aguardar conexão completa
+    wait_for_market_connection()
+    
+    # 5. Registrar callbacks adicionais APÓS login
+    dll.SetNewTradeCallback(callbacks['trade'])
+    dll.SetTinyBookCallback(callbacks['tiny_book'])
+    dll.SetOfferBookCallbackV2(callbacks['offer_book'])
+    dll.SetPriceBookCallback(callbacks['price_book'])
+    
+    # 6. Subscrever ao símbolo
+    dll.SubscribeTicker(c_wchar_p("WDOU25"), c_wchar_p("F"))
+    dll.SubscribeOfferBook(c_wchar_p("WDOU25"), c_wchar_p("F"))
+    dll.SubscribePriceBook(c_wchar_p("WDOU25"), c_wchar_p("F"))
+```
+
+#### 3. **Callbacks Essenciais para Dados Reais**
+
+```python
+# TinyBook - Recebe bid/ask básico
+@WINFUNCTYPE(None, POINTER(TAssetIDRec), c_double, c_int, c_int)
+def tinyBookCallBack(assetId, price, qtd, side):
+    # side: 0 = Bid, 1 = Ask
+    # price: Preço real (validar > 1000 e < 10000 para WDO)
+    if price > 1000 and price < 10000:
+        if side == 0:
+            self.last_bid = price
+        else:
+            self.last_ask = price
+```
+
+#### 4. **Validação de Dados Reais**
+
+**IMPORTANTE**: Sempre validar que os preços são reais:
+- WDO geralmente entre R$ 4000 - R$ 7000
+- Rejeitar valores 0.00 ou fora da faixa
+- Verificar bid < ask
+
+#### 5. **Problemas Comuns e Soluções**
+
+| Problema | Causa | Solução |
+|----------|-------|---------|
+| Bid/Ask = 0.00 | Callbacks criados após login | Criar callbacks ANTES do DLLInitializeLogin |
+| Sem dados | Método initialize() errado | Usar DLLInitializeLogin, não DLLInitialize |
+| Dados não atualizam | Subscrição incorreta | Usar SubscribeTicker + SubscribeOfferBook + SubscribePriceBook |
+| ML retorna valores iguais | Sem dados reais | Verificar se bid/ask > 0 antes de processar |
+
+#### 6. **Arquivos Críticos**
+
+- `src/connection_manager_working.py` - Implementação correta da conexão
+- `test_book_connection.py` - Script de teste que comprova funcionamento
+- `book_collector.py` (projeto antigo) - Referência de implementação funcional
+
+#### 7. **Verificação de Funcionamento**
+
+Para confirmar que está recebendo dados reais:
+
+```python
+# Nos logs, procurar por:
+"[TINY_BOOK] WDOU25 BID: R$ 5441.50 x 500"  # ✅ Dados reais
+"[TINY_BOOK] WDOU25 ASK: R$ 5442.00 x 525"  # ✅ Dados reais
+
+# Evitar:
+"Bid: 0.00 Ask: 0.00"  # ❌ Sem dados reais
+```
+
+#### 8. **Notas Importantes**
+
+- **NÃO é necessário ter o ProfitChart aberto** - A DLL faz conexão direta com o servidor
+- **Servidor de produção**: producao.nelogica.com.br:8184
+- **Símbolo atual**: WDOU25 (confirmar mensalmente)
+- **Horário de funcionamento**: 9h às 18h (dias úteis)
 
 ---
 
