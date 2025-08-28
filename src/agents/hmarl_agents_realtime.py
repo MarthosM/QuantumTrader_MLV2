@@ -65,12 +65,27 @@ class HMARLAgentsRealtime:
         
         # Usar features se disponíveis
         if hasattr(self, 'last_features') and self.last_features:
+            # USAR VOLUME REAL DO VOLUMETRACKER!
+            delta_volume = self.last_features.get('delta_volume', 0)
+            buy_sell_ratio = self.last_features.get('buy_sell_ratio', 1.0)
+            volume_pressure = self.last_features.get('volume_pressure', 0)
+            
+            # Manter features antigas como fallback
             ofi = self.last_features.get('order_flow_imbalance_5', 0)
             signed_vol = self.last_features.get('signed_volume_5', 0)
             trade_flow = self.last_features.get('trade_flow_5', 0)
             
-            # Calcular sinal baseado nas features
-            combined = ofi * 0.4 + np.sign(signed_vol) * 0.3 + np.sign(trade_flow) * 0.3
+            # Calcular sinal baseado nas features com PRIORIDADE para volume real
+            if delta_volume != 0:  # Temos volume real!
+                # Usar volume real com peso maior
+                combined = (
+                    np.sign(delta_volume) * 0.5 +  # Delta volume tem peso maior
+                    (buy_sell_ratio - 1.0) * 0.3 + # Ratio de compra/venda
+                    volume_pressure * 0.2           # Pressão de volume
+                )
+            else:
+                # Fallback para features antigas
+                combined = ofi * 0.4 + np.sign(signed_vol) * 0.3 + np.sign(trade_flow) * 0.3
             
             if combined > 0.3:
                 signal = 1
@@ -218,6 +233,29 @@ class HMARLAgentsRealtime:
     
     def analyze_tape(self) -> tuple[float, float]:
         """TapeReadingAgent - Analisa fita de operações"""
+        
+        # Usar features se disponíveis
+        if hasattr(self, 'last_features') and self.last_features:
+            # USAR VOLUME REAL!
+            current_volume = self.last_features.get('volume', 0)
+            cumulative_volume = self.last_features.get('cumulative_volume', 0)
+            delta_volume = self.last_features.get('delta_volume', 0)
+            
+            # Análise de velocidade de negociação
+            if cumulative_volume > 0:
+                # Volume acelerado indica momentum
+                if current_volume > 50:  # Alto volume no último trade
+                    signal = np.sign(delta_volume) * 0.8
+                    confidence = min(current_volume / 100, 0.9)  # Confiança baseada no volume
+                elif current_volume > 10:
+                    signal = np.sign(delta_volume) * 0.4
+                    confidence = 0.6
+                else:
+                    signal = 0
+                    confidence = 0.5
+                    
+                return signal, confidence
+        
         buffer_size = len(self.price_buffer)
         
         # Log para debug
@@ -289,16 +327,39 @@ class HMARLAgentsRealtime:
         
         # Usar features se disponíveis
         if hasattr(self, 'last_features') and self.last_features:
+            # USAR VOLUME REAL DO TRACKER!
+            delta_volume = self.last_features.get('delta_volume', 0)
+            buy_volume = self.last_features.get('buy_volume', 0)
+            sell_volume = self.last_features.get('sell_volume', 0)
+            cumulative_volume = self.last_features.get('cumulative_volume', 0)
+            
+            # Manter features antigas como fallback
             delta_profile = self.last_features.get('delta_profile', 0)
-            cumulative_delta = self.last_features.get('cumulative_delta', 0)
+            cumulative_delta = self.last_features.get('cumulative_delta', delta_volume)  # Usar delta_volume como fallback
             absorption_ratio = self.last_features.get('absorption_ratio', 0.5)
             volume_clusters = self.last_features.get('volume_clusters', 1)
             
-            # Análise de pegada baseada em delta
+            # Análise de pegada baseada em VOLUME REAL
             footprint_score = 0
             
-            # Delta positivo/negativo indica pressão
-            if cumulative_delta > 100:
+            # Usar delta volume real se disponível
+            if delta_volume != 0:
+                # Delta positivo/negativo indica pressão
+                if delta_volume > 100:
+                    footprint_score += 0.5
+                elif delta_volume > 50:
+                    footprint_score += 0.3
+                elif delta_volume < -100:
+                    footprint_score -= 0.5
+                elif delta_volume < -50:
+                    footprint_score -= 0.3
+                    
+                # Ratio de volume para detectar absorção
+                if buy_volume > sell_volume * 1.5:
+                    footprint_score += 0.2
+                elif sell_volume > buy_volume * 1.5:
+                    footprint_score -= 0.2
+            elif cumulative_delta > 100:
                 footprint_score += 0.4
             elif cumulative_delta < -100:
                 footprint_score -= 0.4

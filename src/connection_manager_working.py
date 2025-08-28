@@ -9,12 +9,14 @@ import time
 import ctypes
 from ctypes import *
 from ctypes import c_longlong  # Adicionar importação explícita
+from ctypes import c_uint32  # Para trade callback
 from datetime import datetime
 from pathlib import Path
 import logging
 from typing import Optional, Callable, Dict, Any
 from dotenv import load_dotenv
 import threading
+from src.market_data.volume_capture_system import VolumeTracker
 
 # Carregar variáveis de ambiente
 load_dotenv('.env.production')
@@ -32,6 +34,7 @@ class ConnectionManagerWorking:
     def __init__(self, dll_path: Optional[str] = None):
         self.logger = logging.getLogger('ConnectionManagerWorking')
         self.dll = None
+        self.volume_tracker = VolumeTracker()
         
         # Caminho da DLL
         if dll_path:
@@ -39,9 +42,10 @@ class ConnectionManagerWorking:
         else:
             # Tentar vários caminhos
             possible_paths = [
-                "ProfitDLL64.dll",
+                "C:/Users/marth/OneDrive/Programacao/Python/QuantumTrader_Production/ProfitDLL64.dll",
+                os.path.abspath("ProfitDLL64.dll"),
                 "./ProfitDLL64.dll",
-                "C:/Users/marth/OneDrive/Programacao/Python/QuantumTrader_Production/ProfitDLL64.dll"
+                "ProfitDLL64.dll"
             ]
             for path in possible_paths:
                 if Path(path).exists():
@@ -118,13 +122,14 @@ class ConnectionManagerWorking:
             self.logger.info("Fazendo login com callbacks...")
             
             # DLLInitializeLogin com callbacks (método que funciona!)
+            # Agora passando NewTradeCallback no 8º parâmetro!
             result = self.dll.DLLInitializeLogin(
                 key, user, pwd,
                 self.callback_refs['state'],         # stateCallback
                 None,                                # historyCallback
                 None,                                # orderChangeCallback
                 None,                                # accountCallback
-                None,                                # accountInfoCallback
+                self.callback_refs.get('new_trade'), # newTradeCallback <- AQUI! (8º parâmetro)
                 self.callback_refs.get('daily'),     # newDailyCallback
                 self.callback_refs['price_book'],    # priceBookCallback
                 self.callback_refs['offer_book'],    # offerBookCallback
@@ -319,6 +324,51 @@ class ConnectionManagerWorking:
             return None
             
         self.callback_refs['daily'] = dailyCallback
+        
+        # NewTradeCallback com estrutura correta (10 parâmetros diretos)
+        # Baseado na solução descoberta em analises_claude
+        @WINFUNCTYPE(None, c_void_p, c_char_p, c_uint32, c_double, c_double, c_int, c_int, c_int, c_int, c_char)
+        def newTradeCallback(asset_id, date, trade_number, price, financial_volume, quantity, buy_agent, sell_agent, trade_type, is_edit):
+            """Callback de trade com volume REAL em 'quantity' (nQtd)"""
+            with self._lock:
+                self.callbacks['trade'] += 1
+                
+                # VOLUME REAL está no parâmetro quantity (nQtd - 6º parâmetro)
+                volume_contratos = quantity
+                
+                # Validar valores razoáveis
+                if price > 1000 and price < 10000 and 0 < volume_contratos < 10000:
+                    self.last_trade_price = price
+                    
+                    # Processar no VolumeTracker
+                    trade_data = {
+                        'volume': volume_contratos,
+                        'price': price,
+                        'trade_type': trade_type,  # 2=Buy, 3=Sell
+                        'timestamp': datetime.now().isoformat()
+                    }
+                    
+                    # Processar com VolumeTracker
+                    self.volume_tracker.process_trade(trade_data)
+                    
+                    # Log dos primeiros trades para verificar
+                    if self.callbacks['trade'] <= 5:
+                        direction = 'BUY' if trade_type == 2 else 'SELL' if trade_type == 3 else 'UNK'
+                        self.logger.info(f'[TRADE] #{self.callbacks["trade"]}: {direction} {volume_contratos} @ R$ {price:.2f}')
+                    elif self.callbacks['trade'] % 100 == 0:
+                        stats = self.volume_tracker.get_current_stats()
+                        self.logger.info(f'[VOLUME STATS] Total: {stats["cumulative_volume"]} | Delta: {stats["delta_volume"]}')
+                    
+                    # Chamar callback externo se configurado
+                    if self._trade_callback:
+                        try:
+                            self._trade_callback(self.target_ticker, trade_data)
+                        except Exception as e:
+                            self.logger.error(f"Erro no trade callback externo: {e}")
+                            
+            return None
+            
+        self.callback_refs['new_trade'] = newTradeCallback
     
     def _wait_login(self):
         """Aguarda login completo"""
@@ -350,8 +400,9 @@ class ConnectionManagerWorking:
         except ImportError:
             from profit_trade_structures import decode_trade_v2
         
-        # Tentar SetTradeCallbackV2 primeiro (mais novo)
-        if hasattr(self.dll, 'SetTradeCallbackV2'):
+        # DESABILITADO - Usando newTradeCallback no DLLInitializeLogin
+        # O novo callback com volume real já foi registrado no login
+        if False and hasattr(self.dll, 'SetTradeCallbackV2'):
             # TConnectorTradeCallback para V2
             @WINFUNCTYPE(None, POINTER(c_byte))
             def tradeCallbackV2(trade_ptr):
@@ -429,7 +480,8 @@ class ConnectionManagerWorking:
             self.logger.info(f"[OK] SetTradeCallbackV2 registrado: {result}")
             
         # Fallback para SetTradeCallback (sem 'New')
-        elif hasattr(self.dll, 'SetTradeCallback'):
+        # DESABILITADO - Usando newTradeCallback no DLLInitializeLogin
+        elif False and hasattr(self.dll, 'SetTradeCallback'):
             @WINFUNCTYPE(None, c_wchar_p, c_double, c_int, c_int, c_int)
             def tradeCallback(ticker, price, qty, buyer, seller):
                 with self._lock:
@@ -462,6 +514,13 @@ class ConnectionManagerWorking:
             self.callback_refs['trade'] = tradeCallback
             self.dll.SetTradeCallback(self.callback_refs['trade'])
             self.logger.info("[OK] SetTradeCallback registrado")
+            
+        # Log do status do callback de trade
+        if 'new_trade' in self.callback_refs:
+            self.logger.info("[OK] NewTradeCallback registrado no DLLInitializeLogin")
+            self.logger.info("  Aguardando trades para captura de VOLUME REAL...")
+        else:
+            self.logger.warning("[!] NewTradeCallback não foi registrado!")
             
         # Re-registrar callbacks de book para garantir
         if hasattr(self.dll, 'SetTinyBookCallback'):
@@ -534,6 +593,10 @@ class ConnectionManagerWorking:
         """Define callback para trades"""
         self._trade_callback = callback
         self.logger.info("Trade callback configurado")
+    
+    def get_volume_stats(self) -> Dict[str, Any]:
+        """Retorna estatísticas de volume do VolumeTracker"""
+        return self.volume_tracker.get_current_stats()
     
     def get_current_prices(self) -> Dict[str, float]:
         """Retorna preços atuais"""

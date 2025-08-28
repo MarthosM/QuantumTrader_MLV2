@@ -2087,6 +2087,44 @@ class QuantumTraderCompleteOCOEvents:
                     ma20 = np.mean(prices[-20:])
                     features['ma_5_20_ratio'] = ma5 / ma20 if ma20 != 0 else 1
             
+            # Features de VOLUME REAL do VolumeTracker
+            if self.connection and hasattr(self.connection, 'get_volume_stats'):
+                volume_stats = self.connection.get_volume_stats()
+                
+                # Log a cada 20 cálculos
+                if self._feature_calc_count % 20 == 0 and volume_stats['cumulative_volume'] > 0:
+                    logger.info(f"[VOLUME TRACKER] Stats:")
+                    logger.info(f"  Total Volume: {volume_stats['cumulative_volume']} contracts")
+                    logger.info(f"  Delta: {volume_stats['delta_volume']} (Buy - Sell)")
+                
+                # Features de volume
+                features['volume'] = float(volume_stats['current_volume'])
+                features['cumulative_volume'] = float(volume_stats['cumulative_volume'])
+                features['buy_volume'] = float(volume_stats['buy_volume'])
+                features['sell_volume'] = float(volume_stats['sell_volume'])
+                features['delta_volume'] = float(volume_stats['delta_volume'])
+                
+                # Volume ratios
+                if volume_stats['sell_volume'] > 0:
+                    features['buy_sell_ratio'] = volume_stats['buy_volume'] / volume_stats['sell_volume']
+                else:
+                    features['buy_sell_ratio'] = 1.0 if volume_stats['buy_volume'] > 0 else 0.0
+                    
+                # Volume pressure indicator
+                if volume_stats['cumulative_volume'] > 0:
+                    features['volume_pressure'] = volume_stats['delta_volume'] / volume_stats['cumulative_volume']
+                else:
+                    features['volume_pressure'] = 0.0
+            else:
+                # Default volume features quando não há dados
+                features['volume'] = 0.0
+                features['cumulative_volume'] = 0.0
+                features['buy_volume'] = 0.0
+                features['sell_volume'] = 0.0
+                features['delta_volume'] = 0.0
+                features['buy_sell_ratio'] = 1.0
+                features['volume_pressure'] = 0.0
+            
             # Features de book
             if self.last_book_update:
                 book = self.last_book_update
@@ -2299,6 +2337,16 @@ class QuantumTraderCompleteOCOEvents:
                     }
                 }
             }
+            
+            # Adicionar dados de volume real se disponível
+            if self.connection and hasattr(self.connection, 'get_volume_stats'):
+                volume_stats = self.connection.get_volume_stats()
+                hmarl_data['market_data']['volume'] = volume_stats.get('current_volume', 0)
+                
+                # Salvar estatísticas completas de volume
+                volume_file = Path("data/monitor/volume_stats.json")
+                with open(volume_file, 'w') as f:
+                    json.dump(volume_stats, f, indent=2)
             
             # Adicionar dados do consensus se disponível
             if consensus:

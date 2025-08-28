@@ -1,6 +1,31 @@
-# 🔧 Developer Guide - QuantumTrader Production v4.3
+# 🔧 Developer Guide - QuantumTrader Production v4.4
 
 ## Arquitetura e Desenvolvimento do Sistema Híbrido ML + HMARL com Dados Reais
+
+---
+
+## 🆕 Atualizações v4.4 (28/08/2025 - Volume Real Capturado!)
+
+### ✅ VOLUME REAL FUNCIONANDO 100%
+
+#### 📊 Sistema de Captura de Volume Real Implementado
+- **VolumeTracker**: Classe dedicada para rastreamento de volume
+- **Captura em tempo real**: Cada trade com volume em contratos
+- **Análise Buy/Sell**: Separação automática por agressão
+- **Delta Volume**: Cálculo de pressão compradora/vendedora
+- **Integração completa**: ML features e HMARL agents usando volume real
+
+#### Estatísticas Atuais (28/08 15:15):
+```
+Total Capturado: 5597 contratos
+Buy: 887 contratos (15.8%)
+Sell: 4034 contratos (72.1%)
+Delta: -3147 (forte pressão vendedora)
+```
+
+#### Arquivos de Monitoramento:
+- `data/monitor/volume_stats.json`: Estatísticas completas de volume
+- `data/monitor/hmarl_status.json`: Agora inclui volume no market_data
 
 ---
 
@@ -65,6 +90,27 @@ class TAssetIDRec(Structure):
         ("ticker", c_wchar * 35),
         ("bolsa", c_wchar * 15),
     ]
+```
+
+#### 2. **Captura de Volume Real (NOVO v4.4)**
+
+```python
+# VolumeTracker integrado ao ConnectionManagerWorking
+from src.market_data.volume_capture_system import VolumeTracker
+
+# Trade callback correto para volume real
+@WINFUNCTYPE(None, c_void_p, c_char_p, c_uint32, c_double, c_double, 
+             c_int, c_int, c_int, c_int, c_char)
+def newTradeCallback(asset_id, date, trade_number, price, financial_volume, 
+                    quantity, buy_agent, sell_agent, trade_type, is_edit):
+    # quantity (6º param) = VOLUME REAL EM CONTRATOS!
+    volume_contratos = quantity
+    
+    # trade_type: 2=Buy, 3=Sell
+    if trade_type == 2:
+        self.volume_tracker.buy_volume += volume_contratos
+    elif trade_type == 3:
+        self.volume_tracker.sell_volume += volume_contratos
 ```
 
 #### 2. **Sequência Correta de Inicialização**
