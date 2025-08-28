@@ -1,9 +1,9 @@
 {
-  "timestamp": "2025-08-22T17:21:20.279074",
-  "signal": -1,
-  "confidence": 0.6128365334004808,
-  "entry_price": 5434.0,
-  "stop_loss": 5447.0,
-  "take_profit": 5421.5,
+  "timestamp": "2025-08-28T14:11:40.527309",
+  "signal": 1,
+  "confidence": 0.3828448740568659,
+  "entry_price": 5401.0,
+  "stop_loss": 5389.0,
+  "take_profit": 5413.5,
   "risk_reward": 1.0
 }

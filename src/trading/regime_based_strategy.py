@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from enum import Enum
 import logging
 from collections import deque
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -63,12 +64,24 @@ class RegimeDetector:
         self.price_buffer.append(price)
         self.volume_buffer.append(volume)
         
+        # DEBUG: Log periódico para verificar dados
+        if not hasattr(self, '_update_count'):
+            self._update_count = 0
+        self._update_count += 1
+        
+        if self._update_count % 50 == 0:
+            recent_prices = list(self.price_buffer)[-10:] if len(self.price_buffer) >= 10 else list(self.price_buffer)
+            logger.debug(f"[REGIME DETECTOR] Update #{self._update_count}: Buffer size={len(self.price_buffer)}, Last prices: {[f'{p:.2f}' for p in recent_prices]}")
+        
     def detect_regime(self) -> Tuple[MarketRegime, float]:
         """
         Detecta o regime atual do mercado com análise multi-período
         Returns: (regime, confidence)
         """
-        if len(self.price_buffer) < 20:
+        if len(self.price_buffer) < 10:  # Reduzido de 20 para 10 para detecção mais rápida
+            # Se tem poucos dados mas tem alguns, usar fallback para lateral
+            if len(self.price_buffer) >= 5:
+                return MarketRegime.LATERAL, 0.3  # Baixa confiança mas permite operação
             return MarketRegime.UNDEFINED, 0.0
             
         prices = np.array(self.price_buffer)
@@ -525,12 +538,96 @@ class RegimeBasedTradingSystem:
         logger.info("Sistema de Trading Baseado em Regime inicializado")
         logger.info(f"Confiança mínima: {min_confidence:.0%}")
         logger.info("Risk/Reward: Tendência 1.5:1 | Lateralização 1.0:1")
-        logger.info("✓ Sistema Anti-Contra-Tendência ATIVO")
+        logger.info("[OK] Sistema Anti-Contra-Tendencia ATIVO")
         
     def update(self, price: float, volume: float):
         """Atualiza o sistema com novos dados"""
         self.regime_detector.update(price, volume)
         self.bars_since_last_signal += 1
+    
+    def process_market_data(self, current_price: float, volume: float = 0, 
+                           hmarl_signal: Optional[Dict] = None) -> Optional[RegimeSignal]:
+        """
+        Processa dados de mercado e retorna sinal de trading se houver
+        
+        Args:
+            current_price: Preço atual do mercado
+            volume: Volume de trading (opcional)
+            hmarl_signal: Sinal HMARL se disponível
+            
+        Returns:
+            RegimeSignal ou None se não houver sinal
+        """
+        # Atualizar dados
+        self.update(current_price, volume)
+        
+        # Detectar regime
+        regime, confidence = self.regime_detector.detect_regime()
+        self.regime_history.append(regime)
+        
+        # Log periódico do regime
+        if not hasattr(self, '_log_count'):
+            self._log_count = 0
+        self._log_count += 1
+        
+        if self._log_count % 100 == 0:
+            logger.info(f"[REGIME] {regime.value} (confidence: {confidence:.1%})")
+        
+        # Se regime undefined mas tem alguns dados, usar fallback para lateral
+        if regime == MarketRegime.UNDEFINED and len(self.regime_detector.price_buffer) >= 5:
+            regime = MarketRegime.LATERAL
+            confidence = 0.3
+            if self._log_count % 100 == 0:
+                logger.info("[REGIME] Usando fallback LATERAL para regime undefined")
+        
+        # Verificar se pode gerar sinal
+        if self.bars_since_last_signal < self.min_bars_between_signals:
+            return None
+            
+        # Tentar gerar sinal baseado no regime
+        signal = None
+        
+        if regime in [MarketRegime.UPTREND, MarketRegime.DOWNTREND, 
+                     MarketRegime.STRONG_UPTREND, MarketRegime.STRONG_DOWNTREND]:
+            # Usar estratégia de tendência
+            signal = self.trend_strategy.generate_signal(
+                regime, current_price, 
+                self.regime_detector.price_buffer,
+                hmarl_signal
+            )
+            
+        elif regime == MarketRegime.LATERAL:
+            # Usar estratégia lateral
+            signal = self.lateral_strategy.generate_signal(
+                regime, current_price,
+                self.regime_detector.price_buffer,
+                hmarl_signal,
+                self.regime_detector
+            )
+            # Atualizar níveis de suporte/resistência
+            if hasattr(self.lateral_strategy, 'last_support_levels'):
+                self.last_support_levels = self.lateral_strategy.last_support_levels
+                self.last_resistance_levels = self.lateral_strategy.last_resistance_levels
+        
+        # Se gerou sinal, validar contra tendência
+        if signal and signal.signal != 0:
+            is_valid, reason = self.validate_trend_alignment(
+                signal.signal, regime, confidence
+            )
+            
+            if not is_valid:
+                if self._log_count % 50 == 0:
+                    logger.warning(f"[TREND BLOCK] {reason}")
+                return None
+            
+            # Sinal válido - resetar contador
+            self.bars_since_last_signal = 0
+            self.last_signal_time = datetime.now()
+            self.total_signals += 1
+            
+            return signal
+            
+        return None
     
     def validate_trend_alignment(self, signal: int, regime: MarketRegime, 
                                  confidence: float = 1.0) -> Tuple[bool, str]:

@@ -1,12 +1,33 @@
 {
-  "timestamp": "2025-08-19T19:13:34.817194",
-  "layers": [
-    "context",
-    "microstructure",
-    "meta_learner"
+  "trained_at": "2025-08-25T19:22:47.653094",
+  "data_file": "C:\\Users\\marth\\Downloads\\WDO_FUT\\WDOFUT_BMF_T.csv",
+  "total_samples": 4038,
+  "features": [
+    "returns_1",
+    "returns_5",
+    "returns_10",
+    "returns_20",
+    "volatility_10",
+    "volatility_20",
+    "volatility_50",
+    "volume_ratio",
+    "trade_intensity",
+    "order_flow_imbalance",
+    "signed_volume",
+    "rsi_14",
+    "spread",
+    "bid_pressure",
+    "ask_pressure",
+    "book_imbalance"
   ],
-  "scalers": [
-    "context",
-    "microstructure"
-  ]
+  "models": {
+    "context": "regime_detector.pkl",
+    "microstructure": "order_flow_analyzer.pkl",
+    "meta": "meta_learner.pkl"
+  },
+  "performance": {
+    "context_acc": 0.6089108910891089,
+    "micro_acc": 0.5816831683168316,
+    "meta_acc": 0.568069306930693
+  }
 }

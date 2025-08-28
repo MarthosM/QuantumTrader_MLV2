@@ -26,9 +26,23 @@
       "Bash(start cmd /k python core/monitor_console_enhanced.py)",
       "Bash(cmd /c:*)",
       "Bash(taskkill:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Read(/C:\\Users\\marth\\Downloads\\ProfitDLL\\Manual/**)",
+      "Read(/C:\\Users\\marth\\Downloads\\ProfitDLL\\Manual/**)",
+      "Read(/C:\\Users\\marth\\Downloads\\ProfitDLL\\Manual/**)",
+      "Read(/C:\\Users\\marth\\Downloads\\ProfitDLL\\Manual/**)",
+      "Bash(pdftotext:*)",
+      "Read(/C:\\Users\\marth\\OneDrive\\Programacao\\Python\\Projetos\\QuantumTrader_ML/**)",
+      "Read(/C:\\Users\\marth\\OneDrive\\Programacao\\Python\\Projetos\\QuantumTrader_ML/**)",
+      "Read(/C:\\Users\\marth\\OneDrive\\Programacao\\Python\\Projetos\\QuantumTrader_ML/**)",
+      "Read(C:\\Users\\marth\\OneDrive\\Programacao\\Python\\analises_claude/**)",
+      "Read(C:\\Users\\marth\\OneDrive\\Programacao\\Python\\analises_claude/**)",
+      "Read(C:\\Users\\marth\\OneDrive\\Programacao\\Python\\analises_claude/**)"
     ],
     "deny": [],
-    "defaultMode": "acceptEdits"
+    "defaultMode": "acceptEdits",
+    "additionalDirectories": [
+      "C:\\Users\\marth\\Downloads\\WDO_FUT"
+    ]
   }
 }

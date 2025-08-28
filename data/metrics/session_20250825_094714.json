@@ -1,0 +1,130 @@
+{
+  "start_time": "2025-08-25T09:46:28.895379",
+  "end_time": "2025-08-25T09:47:14.205101",
+  "total_trades": 0,
+  "daily_pnl": 0,
+  "regime_changes": 0,
+  "trades": [],
+  "regime_metrics": {
+    "TRENDING_UP": {
+      "total_trades": 0,
+      "winning_trades": 0,
+      "losing_trades": 0,
+      "win_rate": 0.0,
+      "total_pnl": 0.0,
+      "average_win": 0.0,
+      "average_loss": 0.0,
+      "max_win": 0.0,
+      "max_loss": 0.0,
+      "profit_factor": 0.0,
+      "sharpe_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "average_duration": 0,
+      "best_hour": null,
+      "worst_hour": null,
+      "trade_distribution": "defaultdict(<class 'int'>, {})",
+      "pnl_curve": [],
+      "confidence_stats": {
+        "ml_avg": 0.0,
+        "hmarl_avg": 0.0,
+        "combined_avg": 0.0
+      }
+    },
+    "TRENDING_DOWN": {
+      "total_trades": 0,
+      "winning_trades": 0,
+      "losing_trades": 0,
+      "win_rate": 0.0,
+      "total_pnl": 0.0,
+      "average_win": 0.0,
+      "average_loss": 0.0,
+      "max_win": 0.0,
+      "max_loss": 0.0,
+      "profit_factor": 0.0,
+      "sharpe_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "average_duration": 0,
+      "best_hour": null,
+      "worst_hour": null,
+      "trade_distribution": "defaultdict(<class 'int'>, {})",
+      "pnl_curve": [],
+      "confidence_stats": {
+        "ml_avg": 0.0,
+        "hmarl_avg": 0.0,
+        "combined_avg": 0.0
+      }
+    },
+    "RANGING": {
+      "total_trades": 0,
+      "winning_trades": 0,
+      "losing_trades": 0,
+      "win_rate": 0.0,
+      "total_pnl": 0.0,
+      "average_win": 0.0,
+      "average_loss": 0.0,
+      "max_win": 0.0,
+      "max_loss": 0.0,
+      "profit_factor": 0.0,
+      "sharpe_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "average_duration": 0,
+      "best_hour": null,
+      "worst_hour": null,
+      "trade_distribution": "defaultdict(<class 'int'>, {})",
+      "pnl_curve": [],
+      "confidence_stats": {
+        "ml_avg": 0.0,
+        "hmarl_avg": 0.0,
+        "combined_avg": 0.0
+      }
+    },
+    "VOLATILE": {
+      "total_trades": 0,
+      "winning_trades": 0,
+      "losing_trades": 0,
+      "win_rate": 0.0,
+      "total_pnl": 0.0,
+      "average_win": 0.0,
+      "average_loss": 0.0,
+      "max_win": 0.0,
+      "max_loss": 0.0,
+      "profit_factor": 0.0,
+      "sharpe_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "average_duration": 0,
+      "best_hour": null,
+      "worst_hour": null,
+      "trade_distribution": "defaultdict(<class 'int'>, {})",
+      "pnl_curve": [],
+      "confidence_stats": {
+        "ml_avg": 0.0,
+        "hmarl_avg": 0.0,
+        "combined_avg": 0.0
+      }
+    },
+    "UNDEFINED": {
+      "total_trades": 0,
+      "winning_trades": 0,
+      "losing_trades": 0,
+      "win_rate": 0.0,
+      "total_pnl": 0.0,
+      "average_win": 0.0,
+      "average_loss": 0.0,
+      "max_win": 0.0,
+      "max_loss": 0.0,
+      "profit_factor": 0.0,
+      "sharpe_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "average_duration": 0,
+      "best_hour": null,
+      "worst_hour": null,
+      "trade_distribution": "defaultdict(<class 'int'>, {})",
+      "pnl_curve": [],
+      "confidence_stats": {
+        "ml_avg": 0.0,
+        "hmarl_avg": 0.0,
+        "combined_avg": 0.0
+      }
+    }
+  }
+}

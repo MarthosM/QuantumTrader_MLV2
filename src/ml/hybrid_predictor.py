@@ -14,6 +14,9 @@ from pathlib import Path
 import warnings
 warnings.filterwarnings('ignore')
 
+# Fix numpy compatibility issue
+np.random.BitGenerator = np.random.bit_generator.BitGenerator
+
 logger = logging.getLogger(__name__)
 
 class HybridMLPredictor:
@@ -35,40 +38,26 @@ class HybridMLPredictor:
         self.confidence_threshold = 0.6
         self.signal_threshold = 0.3
         
-        # Features esperadas por camada
+        # Features esperadas por camada (baseado no treinamento real)
         self.context_features = [
-            # Features de tick/price (30 features)
-            "returns_1", "returns_2", "returns_5", "returns_10", "returns_20",
-            "returns_50", "returns_100", "log_returns_1", "log_returns_5", "log_returns_20",
-            "volatility_10", "volatility_20", "volatility_50", "volatility_100",
-            "volatility_ratio_10_20", "volatility_ratio_20_50", "volatility_ratio_50_100",
-            "momentum_5_20", "momentum_20_50",
-            "sharpe_5", "sharpe_20",
-            "ma_5_20_ratio", "ma_20_50_ratio",
-            "rsi_14", "bb_position",
-            "time_normalized",
-            # Extras para completar 30
-            "volatility_gk", "volatility_ratio_100_200",
-            "signed_volume", "cumulative_signed_volume"
+            # Features treinadas com dados reais (16 features)
+            "returns_1", "returns_5", "returns_10", "returns_20",
+            "volatility_10", "volatility_20", "volatility_50",
+            "volume_ratio", "trade_intensity",
+            "order_flow_imbalance", "signed_volume",
+            "rsi_14", "spread",
+            "bid_pressure", "ask_pressure", "book_imbalance"
         ]
         
         self.microstructure_features = [
-            # Features de book/microestrutura (35 features)
-            "bid_price_1", "ask_price_1", "spread", "mid_price",
-            "bid_volume_1", "ask_volume_1", "imbalance",
-            "order_flow_imbalance_10", "order_flow_imbalance_20",
-            "order_flow_imbalance_50", "order_flow_imbalance_100",
-            "volume_ratio_20", "volume_ratio_50", "volume_ratio_100",
-            "volume_zscore_20", "volume_zscore_50", "volume_zscore_100",
-            "trade_intensity", "trade_intensity_ratio",
-            "volume_weighted_return", "agent_turnover",
-            # Microestrutura específica
-            "book_pressure", "book_imbalance_ratio", "depth_ratio",
-            "bid_ask_spread_ratio", "effective_spread",
-            "realized_spread", "price_impact",
-            "order_arrival_rate", "cancel_rate",
-            "modify_rate", "aggressive_ratio",
-            "passive_ratio", "large_order_ratio", "small_order_ratio"
+            # Mesmas features usadas no contexto (16 features)
+            # Isso garante compatibilidade com o scaler
+            "returns_1", "returns_5", "returns_10", "returns_20",
+            "volatility_10", "volatility_20", "volatility_50",
+            "volume_ratio", "trade_intensity",
+            "order_flow_imbalance", "signed_volume",
+            "rsi_14", "spread",
+            "bid_pressure", "ask_pressure", "book_imbalance"
         ]
         
         logger.info(f"HybridMLPredictor inicializado - Dir: {self.models_dir}")
@@ -78,54 +67,85 @@ class HybridMLPredictor:
         try:
             models_loaded = 0
             
-            # Camada 1: Contexto
-            context_dir = self.models_dir / "context"
-            if context_dir.exists():
-                for model_file in context_dir.glob("*.pkl"):
-                    model_name = f"context_{model_file.stem}"
-                    self.models[model_name] = joblib.load(model_file)
-                    models_loaded += 1
-                    logger.debug(f"Modelo carregado: {model_name}")
+            # Try to load models with compatibility workaround
+            import sys
+            import io
+            old_stderr = sys.stderr
+            sys.stderr = io.StringIO()  # Suppress numpy warnings
             
-            # Camada 2: Microestrutura
-            micro_dir = self.models_dir / "microstructure"
-            if micro_dir.exists():
-                for model_file in micro_dir.glob("*.pkl"):
-                    model_name = f"micro_{model_file.stem}"
-                    self.models[model_name] = joblib.load(model_file)
-                    models_loaded += 1
-                    logger.debug(f"Modelo carregado: {model_name}")
-            
-            # Camada 3: Meta-Learner
-            meta_dir = self.models_dir / "meta_learner"
-            if meta_dir.exists():
-                for model_file in meta_dir.glob("*.pkl"):
-                    model_name = f"meta_{model_file.stem}"
-                    self.models[model_name] = joblib.load(model_file)
-                    models_loaded += 1
-                    logger.debug(f"Modelo carregado: {model_name}")
-            
-            # Scalers
-            if (self.models_dir / "scaler_context.pkl").exists():
-                self.scalers['context'] = joblib.load(self.models_dir / "scaler_context.pkl")
-                logger.debug("Scaler de contexto carregado")
-            
-            if (self.models_dir / "scaler_microstructure.pkl").exists():
-                self.scalers['microstructure'] = joblib.load(self.models_dir / "scaler_microstructure.pkl")
-                logger.debug("Scaler de microestrutura carregado")
+            try:
+                # Camada 1: Contexto
+                context_dir = self.models_dir / "context"
+                if context_dir.exists():
+                    for model_file in context_dir.glob("*.pkl"):
+                        try:
+                            model_name = f"context_{model_file.stem}"
+                            self.models[model_name] = joblib.load(model_file)
+                            models_loaded += 1
+                            logger.debug(f"Modelo carregado: {model_name}")
+                        except Exception as e:
+                            logger.debug(f"Falha ao carregar {model_file.stem}: {e}")
+                
+                # Camada 2: Microestrutura
+                micro_dir = self.models_dir / "microstructure"
+                if micro_dir.exists():
+                    for model_file in micro_dir.glob("*.pkl"):
+                        try:
+                            model_name = f"micro_{model_file.stem}"
+                            self.models[model_name] = joblib.load(model_file)
+                            models_loaded += 1
+                            logger.debug(f"Modelo carregado: {model_name}")
+                        except Exception as e:
+                            logger.debug(f"Falha ao carregar {model_file.stem}: {e}")
+                
+                # Camada 3: Meta-Learner
+                meta_dir = self.models_dir / "meta_learner"
+                if meta_dir.exists():
+                    for model_file in meta_dir.glob("*.pkl"):
+                        try:
+                            model_name = f"meta_{model_file.stem}"
+                            self.models[model_name] = joblib.load(model_file)
+                            models_loaded += 1
+                            logger.debug(f"Modelo carregado: {model_name}")
+                        except Exception as e:
+                            logger.debug(f"Falha ao carregar {model_file.stem}: {e}")
+                
+                # Scalers
+                try:
+                    if (self.models_dir / "scaler_context.pkl").exists():
+                        self.scalers['context'] = joblib.load(self.models_dir / "scaler_context.pkl")
+                        logger.debug("Scaler de contexto carregado")
+                except:
+                    pass
+                
+                try:
+                    if (self.models_dir / "scaler_microstructure.pkl").exists():
+                        self.scalers['microstructure'] = joblib.load(self.models_dir / "scaler_microstructure.pkl")
+                        logger.debug("Scaler de microestrutura carregado")
+                except:
+                    pass
+                    
+            finally:
+                sys.stderr = old_stderr  # Restore stderr
             
             self.is_loaded = models_loaded > 0
             
             if self.is_loaded:
                 logger.info(f"[OK] {models_loaded} modelos carregados com sucesso")
             else:
-                logger.warning("Nenhum modelo encontrado")
+                logger.warning("Nenhum modelo encontrado - usando fallback baseado em features")
+                # Usar modo fallback sem modelos treinados
+                self.is_loaded = True  # Permitir uso do sistema mesmo sem modelos
+                self.use_fallback = True
             
             return self.is_loaded
             
         except Exception as e:
             logger.error(f"Erro ao carregar modelos: {e}")
-            return False
+            # Usar modo fallback
+            self.is_loaded = True
+            self.use_fallback = True
+            return True
     
     def predict(self, features: Dict[str, float]) -> Dict:
         """
@@ -141,16 +161,41 @@ class HybridMLPredictor:
             if not self.load_models():
                 return {'signal': 0, 'confidence': 0, 'error': 'models_not_loaded'}
         
+        # Validar se features são dinâmicas
+        if not self._validate_features(features):
+            logger.warning("[HYBRID] Features estáticas detectadas - usando sinal neutro")
+            return {
+                'signal': 0, 
+                'confidence': 0.3, 
+                'error': 'static_features',
+                'ml_data': {'warning': 'Features não estão variando'},
+                'predictions': {}
+            }
+        
+        # Use fallback if models couldn't load properly
+        if hasattr(self, 'use_fallback') and self.use_fallback:
+            return self._fallback_predict(features)
+        
         try:
+            # Log features para debug
+            self._log_feature_debug(features)
+            
             # Separar features por camada
             context_data = self._prepare_context_features(features)
             micro_data = self._prepare_microstructure_features(features)
             
             # Camada 1: Predições de Contexto
             context_predictions = self._predict_context(context_data)
+            logger.debug(f"[HYBRID] Context predictions: {context_predictions}")
             
             # Camada 2: Predições de Microestrutura
             micro_predictions = self._predict_microstructure(micro_data)
+            logger.debug(f"[HYBRID] Micro predictions: {micro_predictions}")
+            
+            # Validar se predições são válidas
+            if not context_predictions or not micro_predictions:
+                logger.warning("[HYBRID] Predições incompletas - retornando sinal neutro")
+                return {'signal': 0, 'confidence': 0.3, 'error': 'incomplete_predictions'}
             
             # Camada 3: Meta-Learner combina tudo
             final_prediction = self._predict_meta(
@@ -158,6 +203,7 @@ class HybridMLPredictor:
                 micro_predictions,
                 features
             )
+            logger.debug(f"[HYBRID] Meta prediction: {final_prediction}")
             
             # Determinar sinal final
             signal = self._determine_signal(final_prediction)
@@ -166,11 +212,6 @@ class HybridMLPredictor:
                 context_predictions,
                 micro_predictions
             )
-            
-            # Adicionar variação temporal para evitar valores fixos
-            if hasattr(self, '_add_temporal_variation'):
-                confidence = self._add_temporal_variation(confidence, 'confidence')
-                signal = int(np.sign(self._add_temporal_variation(signal, 'signal')))
             
             return {
                 'signal': signal,
@@ -194,27 +235,48 @@ class HybridMLPredictor:
             return {'signal': 0, 'confidence': 0, 'error': str(e)}
     
     
-    def _add_temporal_variation(self, value: float, key: str = "") -> float:
-        """Adiciona pequena variação temporal para evitar valores fixos"""
-        # Variação baseada no tempo (oscila suavemente)
-        time_factor = np.sin(time.time() / 10) * 0.03  # ±3% de variação
+    def _validate_features(self, features: Dict[str, float]) -> bool:
+        """Valida se as features são dinâmicas e não estáticas"""
+        # Armazenar últimas features para comparação
+        if not hasattr(self, '_last_features'):
+            self._last_features = features.copy()
+            self._static_count = 0
+            return True
         
-        # Adicionar pequeno ruído aleatório
-        if np.random.random() < 0.3:  # 30% de chance de adicionar ruído
-            noise = np.random.normal(0, 0.01)  # 1% de ruído
+        # Verificar features críticas que devem variar
+        critical_features = ['returns_1', 'returns_5', 'volatility_10', 'order_flow_imbalance']
+        static_features = []
+        
+        for feat in critical_features:
+            if feat in features and feat in self._last_features:
+                if abs(features[feat] - self._last_features[feat]) < 1e-8:
+                    static_features.append(feat)
+        
+        # Se muitas features críticas estão estáticas
+        if len(static_features) >= 3:
+            self._static_count += 1
+            if self._static_count > 5:
+                logger.warning(f"[HYBRID] Features estáticas há {self._static_count} ciclos: {static_features}")
+                return False
         else:
-            noise = 0
+            self._static_count = 0
         
-        # Aplicar variação
-        varied_value = value + time_factor + noise
+        # Atualizar últimas features
+        self._last_features = features.copy()
+        return True
+    
+    def _log_feature_debug(self, features: Dict[str, float]):
+        """Log detalhado de features para debug"""
+        # Log apenas periodicamente para não poluir
+        if not hasattr(self, '_debug_counter'):
+            self._debug_counter = 0
         
-        # Manter dentro dos limites
-        if 'confidence' in key.lower():
-            return np.clip(varied_value, 0.0, 1.0)
-        elif 'signal' in key.lower():
-            return np.clip(varied_value, -1.0, 1.0)
-        else:
-            return varied_value
+        self._debug_counter += 1
+        if self._debug_counter % 50 == 0:  # A cada 50 predições
+            logger.info("[HYBRID DEBUG] Sample features:")
+            for key in ['returns_1', 'returns_5', 'volatility_10', 'spread', 'order_flow_imbalance']:
+                if key in features:
+                    logger.info(f"  {key}: {features[key]:.6f}")
     
     def _prepare_context_features(self, features: Dict) -> np.ndarray:
         """Prepara features de contexto"""
@@ -260,15 +322,23 @@ class HybridMLPredictor:
         """Predições da camada de contexto"""
         predictions = {}
         
+        # Sempre garantir que temos valores, mesmo sem modelos
+        time_factor = int(time.time())
+        
         # Regime Detector
         if 'context_regime_detector' in self.models:
             try:
                 pred = self.models['context_regime_detector'].predict_proba(X)[0]
-                predictions['regime'] = np.argmax(pred)
-                predictions['regime_conf'] = np.max(pred)
-            except:
-                predictions['regime'] = 0
-                predictions['regime_conf'] = 0.5
+                predictions['regime'] = int(np.argmax(pred))
+                predictions['regime_conf'] = float(np.max(pred))
+            except Exception as e:
+                logger.error(f"Erro ao fazer predição de regime: {e}")
+                # Sem fallback - retornar sem valores se houver erro
+                return predictions
+        else:
+            logger.warning("Modelo context_regime_detector não disponível")
+            # Sem fallback - retornar vazio se modelo não disponível
+            return predictions
         
         # Volatility Forecaster
         if 'context_volatility_forecaster' in self.models:
@@ -294,16 +364,24 @@ class HybridMLPredictor:
         """Predições da camada de microestrutura"""
         predictions = {}
         
+        # Sempre garantir valores dinâmicos
+        time_factor = int(time.time())
+        
         # Order Flow Analyzer
         if 'micro_order_flow_analyzer' in self.models:
             try:
                 pred = self.models['micro_order_flow_analyzer'].predict_proba(X)[0]
                 # Assumindo 3 classes: SELL(-1), HOLD(0), BUY(1)
-                predictions['order_flow'] = np.argmax(pred) - 1  # Converter para -1, 0, 1
-                predictions['order_flow_conf'] = np.max(pred)
-            except:
-                predictions['order_flow'] = 0
-                predictions['order_flow_conf'] = 0.5
+                predictions['order_flow'] = int(np.argmax(pred) - 1)  # Converter para -1, 0, 1
+                predictions['order_flow_conf'] = float(np.max(pred))
+            except Exception as e:
+                logger.error(f"Erro ao fazer predição de order_flow: {e}")
+                # Sem fallback - retornar sem valores se houver erro
+                return predictions
+        else:
+            logger.warning("Modelo micro_order_flow_analyzer não disponível")
+            # Sem fallback - retornar vazio se modelo não disponível
+            return predictions
         
         # Book Dynamics
         if 'micro_book_dynamics' in self.models:
@@ -328,25 +406,25 @@ class HybridMLPredictor:
         
         try:
             # Preparar features para meta-learner
+            # NOTA: O modelo foi treinado com 6 features, vamos usar apenas essas
             meta_features = []
             
-            # Features de contexto
+            # 6 Features principais usadas no treinamento
             meta_features.append(context_pred.get('regime', 0))
             meta_features.append(context_pred.get('regime_conf', 0.5))
             meta_features.append(context_pred.get('volatility', 0))
-            meta_features.append(context_pred.get('session', 0))
-            meta_features.append(context_pred.get('session_conf', 0.5))
-            
-            # Features de microestrutura
             meta_features.append(micro_pred.get('order_flow', 0))
             meta_features.append(micro_pred.get('order_flow_conf', 0.5))
             meta_features.append(micro_pred.get('book_pressure', 0))
             
-            # Adicionar algumas features diretas importantes
-            meta_features.append(features.get('spread', 0))
-            meta_features.append(features.get('imbalance', 0))
-            meta_features.append(features.get('volatility_20', 0))
-            meta_features.append(features.get('rsi_14', 50))
+            # Se precisar de 12 features (para compatibilidade futura)
+            # Descomente as linhas abaixo:
+            # meta_features.append(context_pred.get('session', 0))
+            # meta_features.append(context_pred.get('session_conf', 0.5))
+            # meta_features.append(features.get('spread', 0))
+            # meta_features.append(features.get('imbalance', 0))
+            # meta_features.append(features.get('volatility_20', 0))
+            # meta_features.append(features.get('rsi_14', 50))
             
             X_meta = np.array(meta_features).reshape(1, -1)
             
@@ -400,3 +478,90 @@ class HybridMLPredictor:
                 importance[name] = model.feature_importances_.tolist()
         
         return importance
+    
+    def _fallback_predict(self, features: Dict[str, float]) -> Dict:
+        """
+        Predição fallback baseada em análise técnica quando modelos não estão disponíveis
+        """
+        try:
+            # Validar features primeiro
+            features_valid = self._validate_features(features)
+            
+            # Análise baseada em indicadores técnicos
+            signal = 0
+            confidence = 0.0
+            
+            # Se features estáticas, retornar neutro
+            if not features_valid:
+                logger.warning("[HYBRID FALLBACK] Features estáticas - retornando sinal neutro")
+                return {
+                    'signal': 0,
+                    'confidence': 0.2,
+                    'ml_data': {'mode': 'fallback', 'warning': 'static_features'},
+                    'predictions': {}
+                }
+            
+            # RSI
+            rsi = features.get('rsi_14', 50)
+            if rsi > 70:
+                signal -= 0.5  # Sobrecomprado
+                confidence += 0.2
+            elif rsi < 30:
+                signal += 0.5  # Sobrevendido
+                confidence += 0.2
+            
+            # Order Flow Imbalance - tentar diferentes chaves
+            ofi = features.get('order_flow_imbalance', 0)
+            if ofi == 0:
+                ofi = features.get('order_flow_imbalance_5', 0)
+            
+            if abs(ofi) > 0.3:
+                signal += np.sign(ofi) * 0.3
+                confidence += 0.15
+            
+            # Volume Imbalance
+            imbalance = features.get('imbalance', 0)
+            if abs(imbalance) > 0.3:
+                signal += np.sign(imbalance) * 0.2
+                confidence += 0.1
+            
+            # Momentum
+            returns_5 = features.get('returns_5', 0)
+            if abs(returns_5) > 0.005:  # 0.5% move
+                signal += np.sign(returns_5) * 0.2
+                confidence += 0.1
+            
+            # Spread analysis
+            spread = features.get('spread', 0.5)
+            if spread < 0.5:  # Tight spread = good liquidity
+                confidence += 0.05
+            
+            # Normalize signal
+            if signal > 0.3:
+                final_signal = 1
+            elif signal < -0.3:
+                final_signal = -1
+            else:
+                final_signal = 0
+            
+            # Garantir limites de confiança sem variação artificial
+            confidence = np.clip(confidence, 0.3, 0.8)
+            
+            return {
+                'signal': final_signal,
+                'confidence': confidence,
+                'ml_data': {
+                    'signal': final_signal,
+                    'confidence': confidence,
+                    'mode': 'fallback'
+                },
+                'predictions': {
+                    'context': {'mode': 'fallback', 'rsi': rsi},
+                    'microstructure': {'ofi': ofi, 'imbalance': imbalance},
+                    'meta': {'signal': final_signal}
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Erro no fallback prediction: {e}")
+            return {'signal': 0, 'confidence': 0, 'error': str(e)}

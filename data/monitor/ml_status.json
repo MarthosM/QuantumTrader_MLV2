@@ -1,13 +1,13 @@
 {
-  "timestamp": "2025-08-22T17:21:16.936717",
+  "timestamp": "2025-08-28T14:12:07.839505",
   "ml_status": "ACTIVE",
-  "ml_predictions": 96,
-  "update_id": 1755894076936,
-  "ml_confidence": 0.6128365334004808,
-  "signal": -1,
-  "context_pred": "HOLD",
-  "context_conf": 0.6128365334004808,
-  "micro_pred": "HOLD",
-  "micro_conf": 0.6128365334004808,
-  "meta_pred": "SELL"
+  "ml_predictions": 0,
+  "update_id": 1756401127839506,
+  "signal": 1,
+  "ml_confidence": 0.5981114637851714,
+  "context_pred": "BUY",
+  "context_conf": 0.5383003174066543,
+  "micro_pred": "BUY",
+  "micro_conf": 0.5682058905959129,
+  "meta_pred": "BUY"
 }

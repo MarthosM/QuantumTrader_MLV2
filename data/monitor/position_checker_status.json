@@ -1,0 +1,12 @@
+{
+  "timestamp": "2025-08-28T14:12:07.056461",
+  "position": {
+    "has_position": false,
+    "quantity": 0,
+    "side": null,
+    "avg_price": 0,
+    "pnl": 0,
+    "last_check": "2025-08-28T14:12:07.056461",
+    "error": "DLL not loaded"
+  }
+}

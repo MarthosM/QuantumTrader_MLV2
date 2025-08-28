@@ -344,8 +344,92 @@ class ConnectionManagerWorking:
     def _setup_additional_callbacks(self):
         """Configura callbacks adicionais após login"""
         
-        # SetNewTradeCallback
-        if hasattr(self.dll, 'SetNewTradeCallback'):
+        # Importar estruturas de trade
+        try:
+            from src.profit_trade_structures import decode_trade_v2
+        except ImportError:
+            from profit_trade_structures import decode_trade_v2
+        
+        # Tentar SetTradeCallbackV2 primeiro (mais novo)
+        if hasattr(self.dll, 'SetTradeCallbackV2'):
+            # TConnectorTradeCallback para V2
+            @WINFUNCTYPE(None, POINTER(c_byte))
+            def tradeCallbackV2(trade_ptr):
+                with self._lock:
+                    self.callbacks['trade'] += 1
+                    
+                    # Decodificar estrutura TConnectorTrade
+                    try:
+                        # Debug DETALHADO: Capturar e analisar bytes
+                        if self.callbacks['trade'] <= 10:  # Primeiros 10 trades
+                            import struct
+                            raw_bytes = cast(trade_ptr, POINTER(c_byte * 200))
+                            raw_data = bytes(raw_bytes.contents[:100])
+                            
+                            # Log hex dump
+                            self.logger.info(f"[TRADE_V2 RAW #{self.callbacks['trade']}] First 100 bytes:")
+                            for offset in range(0, min(len(raw_data), 64), 16):
+                                hex_part = raw_data[offset:offset+16].hex()
+                                self.logger.info(f"  {offset:04x}: {hex_part}")
+                            
+                            # Procurar padrões de volume (int32 ou int64)
+                            self.logger.info(f"[TRADE_V2 ANALYSIS] Searching for volume patterns:")
+                            for offset in range(0, min(len(raw_data)-7, 80), 4):
+                                try:
+                                    # Tentar int32
+                                    val32 = struct.unpack_from('<i', raw_data, offset)[0]
+                                    if 1 <= val32 <= 500:  # Volume típico: 1-500 contratos
+                                        self.logger.info(f"  Possible volume (int32) at offset {offset}: {val32} contracts")
+                                    
+                                    # Tentar int64
+                                    if offset <= len(raw_data)-8:
+                                        val64 = struct.unpack_from('<q', raw_data, offset)[0]
+                                        if 1 <= val64 <= 500:
+                                            self.logger.info(f"  Possible volume (int64) at offset {offset}: {val64} contracts")
+                                    
+                                    # Tentar double (preço)
+                                    if offset <= len(raw_data)-8:
+                                        val_double = struct.unpack_from('<d', raw_data, offset)[0]
+                                        if 5000 < val_double < 6000:  # Preço típico WDO
+                                            self.logger.info(f"  Possible price at offset {offset}: {val_double:.2f}")
+                                except:
+                                    pass
+                        
+                        trade_data = decode_trade_v2(trade_ptr)
+                        
+                        # Extrair dados importantes
+                        price = trade_data.get('price', 0)
+                        quantity = trade_data.get('quantity', 0)  # VOLUME!
+                        
+                        # Atualizar preço e volume
+                        if price > 1000 and price < 10000:
+                            self.last_trade_price = price
+                            
+                            # Log dos primeiros trades para verificar
+                            if self.callbacks['trade'] <= 5:
+                                self.logger.info(f'[TRADE_V2] Trade #{self.callbacks["trade"]}: Price={price:.2f}, Volume={quantity}, Aggressor={trade_data.get("aggressor", "?")}')
+                            elif self.callbacks['trade'] % 100 == 0:
+                                self.logger.info(f'[TRADE_V2] Trade #{self.callbacks["trade"]}: Price={price:.2f}, Volume={quantity}')
+                        
+                        # Chamar callback externo se configurado
+                        if self._trade_callback and quantity > 0:
+                            try:
+                                self._trade_callback(self.target_ticker, trade_data)
+                            except Exception as e:
+                                self.logger.error(f"Erro no trade callback externo: {e}")
+                                
+                    except Exception as e:
+                        if self.callbacks['trade'] <= 3:
+                            self.logger.error(f"Erro decodificando trade V2: {e}")
+                    
+                return None
+                
+            self.callback_refs['trade_v2'] = tradeCallbackV2
+            result = self.dll.SetTradeCallbackV2(self.callback_refs['trade_v2'])
+            self.logger.info(f"[OK] SetTradeCallbackV2 registrado: {result}")
+            
+        # Fallback para SetTradeCallback (sem 'New')
+        elif hasattr(self.dll, 'SetTradeCallback'):
             @WINFUNCTYPE(None, c_wchar_p, c_double, c_int, c_int, c_int)
             def tradeCallback(ticker, price, qty, buyer, seller):
                 with self._lock:
@@ -376,8 +460,8 @@ class ConnectionManagerWorking:
                 return None
                 
             self.callback_refs['trade'] = tradeCallback
-            self.dll.SetNewTradeCallback(self.callback_refs['trade'])
-            self.logger.info("[OK] Trade callback registrado")
+            self.dll.SetTradeCallback(self.callback_refs['trade'])
+            self.logger.info("[OK] SetTradeCallback registrado")
             
         # Re-registrar callbacks de book para garantir
         if hasattr(self.dll, 'SetTinyBookCallback'):
@@ -416,8 +500,25 @@ class ConnectionManagerWorking:
             if hasattr(self.dll, 'SubscribePriceBook'):
                 result = self.dll.SubscribePriceBook(c_wchar_p(symbol), c_wchar_p(exchange))
                 self.logger.info(f"SubscribePriceBook({symbol}, {exchange}) = {result}")
+            
+            # Tentar SubscribeAggregatedBook também (pode incluir volume)
+            if hasattr(self.dll, 'SubscribeAggregatedBook'):
+                result = self.dll.SubscribeAggregatedBook(c_wchar_p(symbol), c_wchar_p(exchange))
+                self.logger.info(f"SubscribeAggregatedBook({symbol}, {exchange}) = {result}")
+            
+            # Verificar se existe método específico para Times & Trades
+            if hasattr(self.dll, 'SubscribeTimesAndTrades'):
+                result = self.dll.SubscribeTimesAndTrades(c_wchar_p(symbol), c_wchar_p(exchange))
+                self.logger.info(f"SubscribeTimesAndTrades({symbol}, {exchange}) = {result}")
+            elif hasattr(self.dll, 'SubscribeTrades'):
+                result = self.dll.SubscribeTrades(c_wchar_p(symbol), c_wchar_p(exchange))
+                self.logger.info(f"SubscribeTrades({symbol}, {exchange}) = {result}")
+            elif hasattr(self.dll, 'SubscribeMarketData'):
+                # Alguns sistemas usam SubscribeMarketData para todos os dados
+                result = self.dll.SubscribeMarketData(c_wchar_p(symbol), c_wchar_p(exchange), c_int(3))  # 3 = Book + Trades
+                self.logger.info(f"SubscribeMarketData({symbol}, {exchange}, 3) = {result}")
                 
-            self.logger.info(f"[OK] Subscrito a {symbol}")
+            self.logger.info(f"[OK] Subscrito a {symbol} com todas as subscrições disponíveis")
             return True
                 
         except Exception as e:

@@ -11,7 +11,7 @@ integração completa com a ProfitDLL versão 4.0.0.30
 from ctypes import (
     Structure, Union, c_int, c_double, c_wchar_p, c_longlong, 
     c_char, c_uint, c_void_p, c_bool, c_byte, c_ubyte, c_int64,
-    POINTER, WINFUNCTYPE, byref
+    POINTER, WINFUNCTYPE, CFUNCTYPE, byref
 )
 from enum import IntEnum
 from typing import Optional
@@ -376,6 +376,22 @@ TPriceBookCallback = WINFUNCTYPE(
     c_void_p       # Reserved
 )
 
+# Callback de book de preços V2 (versão mais recente)
+# IMPORTANTE: Usa CFUNCTYPE (cdecl) e não WINFUNCTYPE (stdcall)!
+TPriceBookCallbackV2 = WINFUNCTYPE(
+    c_int,
+    TAssetID,      # Asset
+    c_int,         # Action (0=Add, 1=Update, 2=Remove)
+    c_int,         # Position
+    c_int,         # Side (0=Buy, 1=Sell)
+    c_int,         # OrderCount
+    c_longlong,    # Quantity (Int64)
+    c_longlong,    # DisplayQuantity (Int64)
+    c_double,      # Price
+    c_void_p,      # ArraySell
+    c_void_p       # ArrayBuy
+)
+
 # Callback de book de ofertas
 TOfferBookCallback = WINFUNCTYPE(
     c_int,
@@ -395,6 +411,36 @@ TOfferBookCallback = WINFUNCTYPE(
     c_wchar_p,     # Date
     c_void_p,      # BookArray
     c_void_p       # Reserved
+)
+
+# Callback para book de ofertas V2 (versão mais recente)
+# IMPORTANTE: Usa CFUNCTYPE (cdecl) e não WINFUNCTYPE (stdcall)!
+TOfferBookCallbackV2 = WINFUNCTYPE(
+    c_int,
+    TAssetID,      # Asset
+    c_int,         # Action (0=Add, 1=Update, 2=Remove)
+    c_int,         # Position
+    c_int,         # Side (0=Buy, 1=Sell)
+    c_longlong,    # Quantity (Int64)
+    c_int,         # Agent
+    c_longlong,    # OfferID
+    c_double,      # Price
+    c_char,        # HasPrice
+    c_char,        # HasQuantity
+    c_char,        # HasDate
+    c_char,        # HasOfferID
+    c_char,        # HasAgent
+    c_wchar_p,     # Date
+    c_void_p,      # ArraySell
+    c_void_p       # ArrayBuy
+)
+
+# Callback para trades V2 (versão mais recente)
+# IMPORTANTE: Usa WINFUNCTYPE (stdcall) no Windows
+# Recebe um ponteiro para estrutura de trade (similar ao TConnectorTradeCallback)
+TTradeCallbackV2 = WINFUNCTYPE(
+    c_int,
+    POINTER(c_void_p)  # Ponteiro para dados do trade V2
 )
 
 # Callback para mudanças na lista de ativos com posição

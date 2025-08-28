@@ -814,13 +814,38 @@ Add to crontab (Linux) or Task Scheduler (Windows):
 ## 💡 Important Notes
 
 1. **Market Hours**: System only works when market is open (9:00-18:00 BRT)
-2. **ProfitChart**: Must be connected for real data
+2. **ProfitDLL Connection**: **NÃO precisa do ProfitChart aberto!** A DLL conecta DIRETAMENTE ao servidor da corretora
 3. **Models**: Hybrid models in `models/hybrid/` (train first!)
 4. **Buffer Time**: Wait 5-10 minutes after start for buffers to fill
 5. **Trading Real**: Sempre verificar `ENABLE_TRADING` em `.env.production` antes de iniciar
 6. **Re-treinamento**: Ocorre automaticamente às 18:40 se houver 8h+ de dados contínuos
 7. **Seleção de Modelos**: Sistema escolhe automaticamente o melhor modelo disponível
 8. **Logs**: Verificar `logs/hybrid_complete_*.log` para detalhes do sistema
+
+## ⚠️ IMPORTANTE: Conexão com ProfitDLL
+
+**O sistema NÃO precisa do ProfitChart aberto para funcionar!**
+
+A ProfitDLL estabelece uma conexão DIRETA e INDEPENDENTE com os servidores da corretora:
+- A DLL conecta diretamente em `producao.nelogica.com.br:8184`
+- Não é necessário ter o ProfitChart rodando
+- A conexão é autônoma e gerenciada pela própria DLL
+- Os dados de mercado vêm direto do servidor, não do ProfitChart
+
+### Requisitos para Conexão
+1. **ProfitDLL64.dll** presente no diretório do projeto ou em `dll/`
+2. **Credenciais válidas** configuradas no `.env.production` (PROFIT_KEY)
+3. **Internet ativa** para conectar ao servidor
+4. **Mercado aberto** (9h-18h dias úteis) para receber dados reais
+
+### Troubleshooting de Conexão
+Se não estiver recebendo dados (Bid/Ask = 0.00):
+1. Verificar se a DLL está no local correto (`dll/ProfitDLL64.dll` ou raiz do projeto)
+2. Confirmar credenciais no `.env.production`
+3. Verificar logs de conexão para erros de autenticação
+4. Confirmar que o mercado está aberto
+5. Verificar se o símbolo está correto (WDOU25 para agosto/2025)
+6. Testar conexão com script isolado: `python test_profit_connection.py`
 
 ## 🚀 Commands Reference
 

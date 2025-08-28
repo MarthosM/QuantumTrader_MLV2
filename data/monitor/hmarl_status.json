@@ -1,37 +1,44 @@
 {
-  "timestamp": "2025-08-22T17:21:50.263722",
+  "timestamp": "2025-08-28T14:12:07.305193",
   "market_data": {
-    "price": 5435.25,
+    "price": 5400.75,
     "volume": 0,
     "book_data": {
       "spread": 0.5,
-      "imbalance": -1.0054409484041194
+      "imbalance": 0.5
     }
   },
   "consensus": {
-    "action": "SELL",
-    "signal": -0.7841144360378492,
-    "confidence": 0.7263554698602688,
-    "agents": {
-      "OrderFlowSpecialist": {
-        "signal": -1,
-        "confidence": 0.95,
-        "weight": 0.3
-      },
-      "LiquidityAgent": {
-        "signal": -0.8016322845212358,
-        "confidence": 0.8647995003866964,
-        "weight": 0.2
-      },
-      "TapeReadingAgent": {
-        "signal": -1,
-        "confidence": 0.5835822791317181,
-        "weight": 0.25
-      },
-      "FootprintPatternAgent": {
-        "signal": 0,
-        "confidence": 0.49,
-        "weight": 0.25
-      }
+    "action": "HOLD",
+    "confidence": 0.4958248121787478,
+    "signal": 0.0,
+    "weights": {
+      "OrderFlowSpecialist": 0.3,
+      "LiquidityAgent": 0.2,
+      "TapeReadingAgent": 0.25,
+      "FootprintPatternAgent": 0.25
+    }
+  },
+  "agents": {
+    "OrderFlowSpecialist": {
+      "signal": 0.0,
+      "confidence": 0.4958248121787478,
+      "weight": 0.3
     },
-    "timestamp": 
+    "LiquidityAgent": {
+      "signal": 0.0,
+      "confidence": 0.446242330960873,
+      "weight": 0.2
+    },
+    "TapeReadingAgent": {
+      "signal": 0.0,
+      "confidence": 0.3966598497429983,
+      "weight": 0.25
+    },
+    "FootprintPatternAgent": {
+      "signal": 0.0,
+      "confidence": 0.4214510903519356,
+      "weight": 0.25
+    }
+  }
+}

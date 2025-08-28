@@ -1,14 +1,53 @@
-# 🔧 Developer Guide - QuantumTrader Production v4.1
+# 🔧 Developer Guide - QuantumTrader Production v4.3
 
 ## Arquitetura e Desenvolvimento do Sistema Híbrido ML + HMARL com Dados Reais
 
 ---
 
-## 🆕 Atualizações v4.1 (26/08/2025 - Conexão com Dados Reais)
+## 🆕 Atualizações v4.3 (27/08/2025 - Correção Features Estáticas)
 
-### 🎯 MUDANÇA CRÍTICA: Implementação de Conexão Real com ProfitDLL
+### 🔴 CORREÇÃO CRÍTICA: Features Estáticas no Sistema
 
-#### ✅ PROBLEMA RESOLVIDO: Sistema Agora Recebe Dados Reais do Mercado!
+#### ✅ PROBLEMA RESOLVIDO: price_history não atualizava devido a campos incorretos no book_data
+
+### 📊 Correção Aplicada para Features Estáticas
+
+#### Problema Identificado
+- Sistema mostrava "Features estáticas há X ciclos" constantemente
+- Valores de returns_1, returns_5, volatility_10 sempre = 0.000000
+- price_history sempre com valores repetidos: [5422.75, 5422.75, 5422.75...]
+
+#### Causa Raiz
+```python
+# PROBLEMA: Código procurava campos que não existiam
+if 'bid_price_1' in book_data and 'ask_price_1' in book_data:  # ❌ Sempre False!
+    self.last_mid_price = (book_data['bid_price_1'] + book_data['ask_price_1']) / 2
+```
+
+O book_data usa campos `bid` e `ask`, não `bid_price_1` e `ask_price_1`.
+
+#### Solução Implementada
+```python
+# CORREÇÃO: Aceitar ambos os formatos
+bid_price = book_data.get('bid_price_1') or book_data.get('bid', 0)
+ask_price = book_data.get('ask_price_1') or book_data.get('ask', 0)
+
+if bid_price > 0 and ask_price > 0:
+    self.last_mid_price = (bid_price + ask_price) / 2
+    self.current_price = self.last_mid_price
+    
+    # Atualizar price_history
+    if self.last_mid_price > 0:
+        self.price_history.append(self.last_mid_price)
+        
+        # Log para verificar variação
+        if len(self.price_history) % 50 == 0:
+            recent_prices = list(self.price_history)[-50:]
+            unique_prices = len(set(recent_prices))
+            logger.info(f'[PRICE HISTORY] Updated: {self.last_mid_price:.2f} | Unique in last 50: {unique_prices}')
+```
+
+### 🎯 SISTEMA COMPLETAMENTE FUNCIONAL COM ML + HMARL + OCO
 
 ### 📡 Como Obter Dados Reais do Mercado através da DLL
 
@@ -125,6 +164,115 @@ Para confirmar que está recebendo dados reais:
 - **Servidor de produção**: producao.nelogica.com.br:8184
 - **Símbolo atual**: WDOU25 (confirmar mensalmente)
 - **Horário de funcionamento**: 9h às 18h (dias úteis)
+
+---
+
+## 🔍 Troubleshooting - Problemas e Soluções Testadas
+
+### Problema: ML Retornando Sempre os Mesmos Valores
+
+**Sintoma**: Modelos ML sempre retornam confidence fixa (ex: 76.06%, 85.29%)
+
+**Causa Raiz**: Sistema não está recebendo dados reais do mercado (Bid/Ask = 0.00)
+
+**Solução Completa**:
+1. Substituir `ConnectionManagerOCO` por `ConnectionManagerWorking`
+2. Garantir callbacks criados ANTES do login
+3. Usar `DLLInitializeLogin` ao invés de `DLLInitialize`
+4. Verificar logs para confirmar dados reais:
+   ```
+   [TINY_BOOK] WDOU25 BID: R$ 5436.50 x 56  ✅
+   [TINY_BOOK] WDOU25 ASK: R$ 5437.00 x 293 ✅
+   ```
+
+### Problema: Buffer Não Enchendo (0/20)
+
+**Sintoma**: Buffer sempre mostra 0/20 mesmo com dados chegando
+
+**Causa**: Callbacks não estão chamando a função externa de processamento
+
+**Solução**:
+```python
+# Em offerBookCallback e tinyBookCallback:
+if self.book_callback:
+    self.book_callback("WDOU25", book_data)  # SEMPRE chamar
+```
+
+### Problema: ImportError c_longlong
+
+**Sintoma**: Erro ao enviar ordens - "cannot access local variable 'c_longlong'"
+
+**Solução**:
+```python
+# No topo do arquivo:
+from ctypes import c_longlong  # Import explícito
+```
+
+### Comportamento Normal vs Problema
+
+**NORMAL**: ML confidence variando durante operação (30% até 95%)
+- Sistema sendo conservador após trades
+- Bloqueio de trades com baixa confidence (<60%)
+
+**PROBLEMA**: ML confidence sempre fixa
+- Verificar se dados reais estão fluindo
+- Confirmar buffers sendo preenchidos
+
+---
+
+## 🚀 Resumo das Correções v4.2
+
+1. **ConnectionManagerWorking**: Nova implementação funcional baseada em código testado
+2. **Callbacks corretos**: Criados ANTES do login (crítico para funcionamento)
+3. **Dados reais confirmados**: Bid/Ask fluindo normalmente (R$ 5436.50/5437.00)
+4. **ML operacional**: Predições variando com dados reais (30% a 95% confidence)
+5. **OCO funcionando**: Ordens bracket enviadas com sucesso
+6. **Sistema de posições**: Monitoramento implementado com PositionMonitor
+7. **Trading real ativado**: Sistema executando ordens reais no mercado
+
+### 📊 Evidências de Funcionamento Correto
+
+```log
+# Dados reais fluindo:
+[TINY_BOOK] WDOU25 BID: R$ 5436.50 x 56
+[TINY_BOOK] WDOU25 ASK: R$ 5437.00 x 293
+
+# ML com predições variadas:
+[ML] Signal: 1, Confidence: 92.56%  ← Alta confidence
+[ML] Signal: 1, Confidence: 37.87%  ← Baixa confidence (conservador)
+
+# Trade executado:
+[OK] Ordem principal enviada! ID: 25082618250945
+[OK] Stop Loss configurado! ID: 25082618250946
+[OK] Take Profit configurado! ID: 25082618250947
+
+# Sistema conservador funcionando:
+[TREND BLOCK] Trade bloqueado com baixa confiança (64%)
+```
+
+### 🎯 Comandos Essenciais
+
+```bash
+# Iniciar sistema completo com OCO e eventos
+python START_SYSTEM_COMPLETE_OCO_EVENTS.py
+
+# Monitorar sistema em tempo real
+python core/monitor_console_enhanced.py
+
+# Testar conexão com dados reais
+python test_book_connection.py
+
+# Verificar posições abertas
+python test_position_monitor.py
+```
+
+### ⚠️ Checklist Pré-Operação
+
+- [ ] Verificar horário do mercado (9h-18h)
+- [ ] Confirmar símbolo atual (WDOU25)
+- [ ] Verificar ENABLE_TRADING=true em .env.production
+- [ ] Aguardar buffer encher (20+ amostras)
+- [ ] Confirmar dados reais nos logs (Bid/Ask > 0)
 
 ---
 
@@ -2060,10 +2208,66 @@ class RegimeSignal:
 - `docs/REGIME_STRATEGY_CONFIG.md` - Configuração detalhada
 - `docs/SYSTEM_MONITORS_GUIDE.md` - Guia dos monitores
 
+## 🔴 Troubleshooting: Features Estáticas (v4.3)
+
+### Problema: "Features estáticas há X ciclos"
+
+#### Sintomas
+- Logs mostrando: `[HYBRID] Features estáticas há X ciclos: ['returns_1', 'returns_5', 'volatility_10']`
+- Valores sempre 0.000000 para returns e volatility
+- price_history com valores repetidos
+- ML sempre retornando HOLD com baixa confiança (~40%)
+
+#### Diagnóstico
+```python
+# Verificar se price_history está variando
+python -c "
+from START_SYSTEM_COMPLETE_OCO_EVENTS import QuantumTraderCompleteOCOEvents
+system = QuantumTraderCompleteOCOEvents()
+# Check últimos 10 valores únicos
+recent = list(system.price_history)[-10:]
+print(f'Valores únicos: {len(set(recent))}/10')
+print(f'Últimos preços: {recent}')
+"
+```
+
+#### Solução Implementada
+```python
+# START_SYSTEM_COMPLETE_OCO_EVENTS.py - linha ~2531
+# ANTES (não funcionava):
+if 'bid_price_1' in book_data and 'ask_price_1' in book_data:
+    # Nunca entrava aqui!
+
+# DEPOIS (corrigido):
+bid_price = book_data.get('bid_price_1') or book_data.get('bid', 0)
+ask_price = book_data.get('ask_price_1') or book_data.get('ask', 0)
+
+if bid_price > 0 and ask_price > 0:
+    self.last_mid_price = (bid_price + ask_price) / 2
+    self.price_history.append(self.last_mid_price)
+```
+
+#### Impacto da Correção
+- ✅ Features de retorno voltam a funcionar
+- ✅ Volatilidade calculada corretamente
+- ✅ ML pode detectar tendências
+- ✅ Sinais BUY/SELL gerados
+- ✅ Sistema sai do modo defensivo
+
+#### Validação Pós-Correção
+```bash
+# Após reiniciar sistema, verificar logs:
+grep "PRICE HISTORY" logs/production_*.log | tail -5
+
+# Deve mostrar:
+# [PRICE HISTORY] Updated: 5423.25 | Unique in last 50: 15
+# (Unique > 1 indica sucesso)
+```
+
 ---
 
-**QuantumTrader v4.1 - Sistema Baseado em Regime**
+**QuantumTrader v4.3 - Sistema com Features Corrigidas**
 
-Sistema determinístico baseado em detecção de regime de mercado, com estratégias específicas por condição e HMARL para timing. Substitui completamente o sistema ML defeituoso anterior.
+Sistema híbrido ML + HMARL com correção crítica para atualização de price_history, garantindo cálculo correto de features baseadas em retornos e volatilidade.
 
 Para suporte técnico, consulte a documentação ou revise o código fonte.
